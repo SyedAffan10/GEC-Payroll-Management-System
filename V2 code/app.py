@@ -17,6 +17,7 @@ def init_database():
             employee_name TEXT NOT NULL,
             employment_type TEXT NOT NULL,
             currency TEXT DEFAULT 'EUR',
+            monthly_basic_salary REAL NOT NULL DEFAULT 0.0,
             payments TEXT,
             deductions TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -31,6 +32,13 @@ def init_database():
     except sqlite3.OperationalError:
         pass
     
+    # Add monthly_basic_salary column if it doesn't exist (for backward compatibility)
+    try:
+        cursor.execute('ALTER TABLE employees ADD COLUMN monthly_basic_salary REAL DEFAULT 0.0')
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    
     # Add additional_daily_payments column if it doesn't exist
     try:
         cursor.execute('ALTER TABLE employees ADD COLUMN additional_daily_payments TEXT DEFAULT "{}"')
@@ -41,7 +49,7 @@ def init_database():
     conn.commit()
     conn.close()
 
-def add_employee(employee_id, employee_name, employment_type, currency, payments, deductions, additional_daily_payments=None):
+def add_employee(employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments, deductions, additional_daily_payments=None):
     """Add a new employee to the database"""
     conn = sqlite3.connect('employees.db')
     cursor = conn.cursor()
@@ -52,9 +60,9 @@ def add_employee(employee_id, employee_name, employment_type, currency, payments
         additional_payments_json = json.dumps(additional_daily_payments) if additional_daily_payments else json.dumps({})
         
         cursor.execute('''
-            INSERT INTO employees (employee_id, employee_name, employment_type, currency, payments, deductions, additional_daily_payments)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (employee_id, employee_name, employment_type, currency, payments_json, deductions_json, additional_payments_json))
+            INSERT INTO employees (employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments, deductions, additional_daily_payments)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments_json, deductions_json, additional_payments_json))
         
         conn.commit()
         return True, "Employee added successfully!"
@@ -78,14 +86,36 @@ def get_employee_by_name(employee_name):
     conn.close()
     
     if result:
+        # Handle monthly_basic_salary with proper type checking
+        monthly_salary = result[10] if len(result) > 10 and result[10] is not None else 0.0
+        if isinstance(monthly_salary, str):
+            try:
+                # Try to parse as JSON first (legacy data)
+                salary_data = json.loads(monthly_salary)
+                if isinstance(salary_data, dict) and 'basic salary' in salary_data:
+                    monthly_salary = salary_data['basic salary']
+                else:
+                    monthly_salary = 0.0
+            except (json.JSONDecodeError, KeyError):
+                try:
+                    monthly_salary = float(monthly_salary)
+                except ValueError:
+                    monthly_salary = 0.0
+        else:
+            try:
+                monthly_salary = float(monthly_salary) if monthly_salary is not None else 0.0
+            except (ValueError, TypeError):
+                monthly_salary = 0.0
+        
         return {
             'id': result[0],
             'employee_id': result[1],
             'employee_name': result[2],
             'employment_type': result[3],
             'currency': result[4] if len(result) > 4 and result[4] else 'EUR',
-            'payments': json.loads(result[5]) if result[5] else {},
-            'deductions': json.loads(result[6]) if result[6] else {},
+            'monthly_basic_salary': monthly_salary,
+            'payments': json.loads(result[5]) if len(result) > 5 and result[5] else {},
+            'deductions': json.loads(result[6]) if len(result) > 6 and result[6] else {},
             'additional_daily_payments': json.loads(result[9]) if len(result) > 9 and result[9] else {},
             'created_at': result[7] if len(result) > 7 else '',
             'updated_at': result[8] if len(result) > 8 else ''
@@ -97,7 +127,7 @@ def get_all_employees():
     conn = sqlite3.connect('employees.db')
     cursor = conn.cursor()
     
-    cursor.execute('SELECT * FROM employees ORDER BY employee_name')
+    cursor.execute('SELECT * FROM employees ORDER BY CAST(employee_id AS INTEGER)')
     results = cursor.fetchall()
     conn.close()
     
@@ -105,12 +135,12 @@ def get_all_employees():
     for result in results:
         try:
             try:
-                payments_data = json.loads(result[5]) if result[5] else {}
+                payments_data = json.loads(result[5]) if len(result) > 5 and result[5] else {}
             except json.JSONDecodeError:
                 payments_data = {}
             
             try:
-                deductions_data = json.loads(result[6]) if result[6] else {}
+                deductions_data = json.loads(result[6]) if len(result) > 6 and result[6] else {}
             except json.JSONDecodeError:
                 deductions_data = {}
             
@@ -119,12 +149,34 @@ def get_all_employees():
             except json.JSONDecodeError:
                 additional_payments_data = {}
             
+            # Handle monthly_basic_salary with proper type checking
+            monthly_salary = result[10] if len(result) > 10 and result[10] is not None else 0.0
+            if isinstance(monthly_salary, str):
+                try:
+                    # Try to parse as JSON first (legacy data)
+                    salary_data = json.loads(monthly_salary)
+                    if isinstance(salary_data, dict) and 'basic salary' in salary_data:
+                        monthly_salary = salary_data['basic salary']
+                    else:
+                        monthly_salary = 0.0
+                except (json.JSONDecodeError, KeyError):
+                    try:
+                        monthly_salary = float(monthly_salary)
+                    except ValueError:
+                        monthly_salary = 0.0
+            else:
+                try:
+                    monthly_salary = float(monthly_salary) if monthly_salary is not None else 0.0
+                except (ValueError, TypeError):
+                    monthly_salary = 0.0
+            
             employees.append({
                 'id': result[0],
                 'employee_id': result[1],
                 'employee_name': result[2],
                 'employment_type': result[3],
                 'currency': result[4] if len(result) > 4 and result[4] else 'EUR',
+                'monthly_basic_salary': monthly_salary,
                 'payments': payments_data,
                 'deductions': deductions_data,
                 'additional_daily_payments': additional_payments_data,
@@ -136,7 +188,7 @@ def get_all_employees():
     
     return employees
 
-def update_employee(emp_id, employee_id, employee_name, employment_type, currency, payments, deductions, additional_daily_payments=None):
+def update_employee(emp_id, employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments, deductions, additional_daily_payments=None):
     """Update employee data"""
     conn = sqlite3.connect('employees.db')
     cursor = conn.cursor()
@@ -149,9 +201,9 @@ def update_employee(emp_id, employee_id, employee_name, employment_type, currenc
         cursor.execute('''
             UPDATE employees 
             SET employee_id = ?, employee_name = ?, employment_type = ?, currency = ?, 
-                payments = ?, deductions = ?, additional_daily_payments = ?, updated_at = CURRENT_TIMESTAMP
+                monthly_basic_salary = ?, payments = ?, deductions = ?, additional_daily_payments = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-        ''', (employee_id, employee_name, employment_type, currency, payments_json, deductions_json, additional_payments_json, emp_id))
+        ''', (employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments_json, deductions_json, additional_payments_json, emp_id))
         
         conn.commit()
         return True, "Employee updated successfully!"
@@ -176,8 +228,134 @@ def delete_employee(emp_id):
     finally:
         conn.close()
 
+def update_existing_employees_with_defaults():
+    """Update existing employees to have default payment and deduction categories"""
+    conn = sqlite3.connect('employees.db')
+    cursor = conn.cursor()
+    
+    try:
+        # Get all employees
+        cursor.execute('SELECT * FROM employees')
+        employees = cursor.fetchall()
+        
+        for emp in employees:
+            emp_id = emp[0]
+            
+            # Parse existing payments and deductions
+            try:
+                existing_payments = json.loads(emp[5]) if len(emp) > 5 and emp[5] else {}
+            except json.JSONDecodeError:
+                existing_payments = {}
+            
+            try:
+                existing_deductions = json.loads(emp[6]) if len(emp) > 6 and emp[6] else {}
+            except json.JSONDecodeError:
+                existing_deductions = {}
+            
+            # Add default payment categories if they don't exist
+            default_payments = {
+                "Monthly Transport Allowance": 0.0,
+                "Monthly Housing Allowance": 0.0,
+                "Monthly Geographic Coefficient": 0.0,
+                "Monthly Relocation": 0.0,
+                "STIP Bonus": 0.0
+            }
+            
+            # Merge with existing payments (existing values take precedence)
+            for key, value in default_payments.items():
+                if key not in existing_payments:
+                    existing_payments[key] = value
+            
+            # Migrate old spelling to new spelling for Monthly Geographic Coefficient
+            if "Monthly Geographic Coeffient" in existing_payments and "Monthly Geographic Coefficient" not in existing_payments:
+                existing_payments["Monthly Geographic Coefficient"] = existing_payments["Monthly Geographic Coeffient"]
+                del existing_payments["Monthly Geographic Coeffient"]
+            elif "Monthly Geographic Coeffient" in existing_payments and "Monthly Geographic Coefficient" in existing_payments:
+                # If both exist, keep the new spelling and remove the old one
+                del existing_payments["Monthly Geographic Coeffient"]
+            
+            # Auto-calculate Monthly Geographic Coefficient based on basic salary and housing allowance
+            monthly_salary = emp[4] if len(emp) > 4 else 0  # monthly_basic_salary is at index 4
+            if isinstance(monthly_salary, str):
+                try:
+                    monthly_salary = float(monthly_salary)
+                except ValueError:
+                    monthly_salary = 0.0
+            
+            housing_allowance = existing_payments.get("Monthly Housing Allowance", 0)
+            if monthly_salary > 0 and housing_allowance > 0 and "Monthly Geographic Coefficient" in existing_payments:
+                # Auto-calculate as 20% of basic salary only if housing allowance is also present
+                existing_payments["Monthly Geographic Coefficient"] = monthly_salary * 0.2
+            
+            # Add default deduction categories if they don't exist
+            default_deductions = {
+                "Monthly EMBO": 0.0,
+                "Monthly EE Pension Contribution": 0.0
+            }
+            
+            # Merge with existing deductions (existing values take precedence)
+            for key, value in default_deductions.items():
+                if key not in existing_deductions:
+                    existing_deductions[key] = value
+            
+            # Auto-calculate Monthly EMBO if basic salary, geographic coefficient, or relocation exist
+            geographic_coefficient = existing_payments.get("Monthly Geographic Coefficient", 0)
+            # Also check for old spelling for backward compatibility
+            if geographic_coefficient == 0:
+                geographic_coefficient = existing_payments.get("Monthly Geographic Coeffient", 0)
+            relocation = existing_payments.get("Monthly Relocation", 0)
+            
+            # Auto-calculate EMBO only if BOTH geographic coefficient AND relocation have values
+            if (geographic_coefficient > 0 and relocation > 0) and "Monthly EMBO" in existing_deductions:
+                embo_base = monthly_salary + geographic_coefficient + relocation
+                embo_amount = embo_base * 13.0 / 100
+                existing_deductions["Monthly EMBO"] = embo_amount
+            
+            # Parse existing additional daily payments
+            try:
+                existing_additional_payments = json.loads(emp[9]) if len(emp) > 9 and emp[9] else {}
+            except json.JSONDecodeError:
+                existing_additional_payments = {}
+            
+            # Add default additional daily payment categories if they don't exist
+            default_additional_payments = {
+                "Field Bonus / Job Bonus in Country": 0.0,
+                "Rotation Premium - In country": 0.0,
+                "Standby Rate - In country": 0.0,
+                "Wellsite Rate In country": 0.0
+            }
+            
+            # Merge with existing additional payments (existing values take precedence)
+            for key, value in default_additional_payments.items():
+                if key not in existing_additional_payments:
+                    existing_additional_payments[key] = value
+            
+            # Update the employee record
+            payments_json = json.dumps(existing_payments)
+            deductions_json = json.dumps(existing_deductions)
+            additional_payments_json = json.dumps(existing_additional_payments)
+            
+            cursor.execute('''
+                UPDATE employees 
+                SET payments = ?, deductions = ?, additional_daily_payments = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (payments_json, deductions_json, additional_payments_json, emp_id))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error updating existing employees: {e}")
+        return False
+    finally:
+        conn.close()
+
 # Initialize database on app start
 init_database()
+
+# Update existing employees with default categories (run once)
+if 'defaults_updated' not in st.session_state:
+    update_existing_employees_with_defaults()
+    st.session_state.defaults_updated = True
 
 # Currency mapping
 CURRENCY_OPTIONS = {
@@ -318,6 +496,27 @@ with tab1:
     with col_btn:
         if st.button("➕ Add New Employee", use_container_width=True, type="primary"):
             st.session_state['show_add_employee_form'] = True
+            # Initialize default categories when opening the form
+            if 'payment_items' not in st.session_state or not st.session_state.payment_items:
+                st.session_state.payment_items = [
+                    {"name": "Monthly Transport Allowance", "value": 0.0},
+                    {"name": "Monthly Housing Allowance", "value": 0.0},
+                    {"name": "Monthly Geographic Coefficient", "value": 0.0, "auto_calculate": True, "percentage": 20.0},
+                    {"name": "Monthly Relocation", "value": 0.0},
+                    {"name": "STIP Bonus", "value": 0.0}
+                ]
+            if 'deduction_items' not in st.session_state or not st.session_state.deduction_items:
+                st.session_state.deduction_items = [
+                    {"name": "Monthly EMBO", "percentage": 13.0, "formula": "basic_salary+geographic_coefficient+relocation"},
+                    {"name": "Monthly EE Pension Contribution", "percentage": 8.0, "formula": "basic_salary+stip_bonus"}
+                ]
+            if 'additional_daily_items' not in st.session_state or not st.session_state.additional_daily_items:
+                st.session_state.additional_daily_items = [
+                    {"name": "Field Bonus / Job Bonus in Country", "value": 0.0},
+                    {"name": "Rotation Premium - In country", "value": 0.0},
+                    {"name": "Standby Rate - In country", "value": 0.0},
+                    {"name": "Wellsite Rate In country", "value": 0.0}
+                ]
     
     # Add Employee Form (popup style)
     if st.session_state.get('show_add_employee_form', False):
@@ -325,22 +524,7 @@ with tab1:
             st.markdown("---")
             st.subheader("➕ Add New Employee")
             
-            # Payment, Deduction and Additional Daily Payments management buttons (outside form)
-            col_pay_btn, col_ded_btn, col_add_daily_btn, col_space = st.columns([1, 1, 1, 1])
-            with col_pay_btn:
-                if st.button("➕ Add Payment"):
-                    st.session_state.payment_items.append({"name": "", "value": 0.0})
-                    st.rerun()
-            with col_ded_btn:
-                if st.button("➕ Add Deduction"):
-                    st.session_state.deduction_items.append({"name": "", "percentage": 0.0})
-                    st.rerun()
-            with col_add_daily_btn:
-                if st.button("➕ Add Daily Payment"):
-                    if 'additional_daily_items' not in st.session_state:
-                        st.session_state.additional_daily_items = []
-                    st.session_state.additional_daily_items.append({"name": "", "value": 0.0})
-                    st.rerun()
+
             
             with st.form("add_employee_form"):
                 # Basic employee information
@@ -360,91 +544,235 @@ with tab1:
                     
                     currency_symbol = get_currency_symbol(currency)
                     st.info(f"Selected Currency: {currency} ({currency_symbol})")
+                    
+                    # Monthly Basic Salary field
+                    monthly_basic_salary = st.number_input(f"Monthly Basic Salary* ({currency_symbol})", 
+                                                         min_value=0.0, step=100.0, 
+                                                         placeholder="Enter monthly basic salary",
+                                                         key="new_monthly_basic_salary")
                 
                 with col2:
                     st.markdown("### 💰 Payment Categories")
                     
-                    # Initialize session state for dynamic inputs
+                    # Initialize session state for dynamic inputs with default payment categories
                     if 'payment_items' not in st.session_state:
-                        st.session_state.payment_items = []
+                        # Default payment categories
+                        st.session_state.payment_items = [
+                            {"name": "Monthly Transport Allowance", "value": 0.0},
+                            {"name": "Monthly Housing Allowance", "value": 0.0},
+                            {"name": "Monthly Geographic Coefficient", "value": 0.0, "auto_calculate": True, "percentage": 20.0},
+                            {"name": "Monthly Relocation", "value": 0.0},
+                            {"name": "STIP Bonus", "value": 0.0}
+                        ]
                     
                     # Payment section
                     payment_dict = {}
                     for i, item in enumerate(st.session_state.payment_items):
-                        col_name, col_value, col_remove = st.columns([3, 2, 0.8])
+                        col_name, col_value = st.columns([3, 2])
                         with col_name:
-                            payment_name = st.text_input(f"Category", key=f"payment_name_{i}", 
-                                                       value=item["name"], placeholder="e.g., days off")
+                            # Display category name as read-only text
+                            st.markdown(f"**{item['name']}**")
+                            payment_name = item["name"]  # Use the fixed name from session state
                         with col_value:
-                            payment_value = st.number_input(f"Rate ({currency_symbol})", key=f"payment_value_{i}", 
-                                                          value=float(item["value"]), min_value=0.0, step=10.0)
-                        with col_remove:
-                            remove_payment = st.checkbox("❌", key=f"remove_payment_{i}", help="Check to remove this payment")
+                            # Auto-calculate Monthly Geographic Coefficient as 20% of basic salary
+                            if item.get("auto_calculate") and "Geographic" in item["name"]:
+                                # Get Housing Allowance value from current form inputs
+                                housing_allowance = 0.0
+                                for j, housing_item in enumerate(st.session_state.payment_items):
+                                    if "Housing Allowance" in housing_item["name"]:
+                                        housing_key = f"payment_value_{j}"
+                                        if housing_key in st.session_state:
+                                            housing_allowance = st.session_state[housing_key]
+                                        break
+                                
+                                # Only auto-calculate if both Basic Salary and Housing Allowance have values
+                                if monthly_basic_salary > 0 and housing_allowance > 0:
+                                    auto_calculated_value = monthly_basic_salary * 0.2
+                                    # Update the session state value to reflect the auto-calculation
+                                    st.session_state.payment_items[i]["value"] = auto_calculated_value
+                                    payment_value = st.number_input(f"Rate ({currency_symbol})", key=f"payment_value_{i}", 
+                                                                  value=float(auto_calculated_value), min_value=0.0, step=10.0,
+                                                                  help=f"Auto-calculated as 20% of Basic Salary ({currency_symbol}{monthly_basic_salary:,.2f})",
+                                                                  disabled=True)
+                                    st.caption(f"💡 Auto: 20% of Basic Salary ({currency_symbol}{monthly_basic_salary:,.2f})")
+                                else:
+                                    # Show 0 when either basic salary or housing allowance is not entered yet
+                                    payment_value = st.number_input(f"Rate ({currency_symbol})", key=f"payment_value_{i}", 
+                                                                  value=0.0, min_value=0.0, step=10.0,
+                                                                  help="Will auto-calculate when both Basic Salary and Housing Allowance are entered",
+                                                                  disabled=True)
+                                    if monthly_basic_salary == 0:
+                                        st.caption(f"💡 Requires Basic Salary to auto-calculate")
+                                    elif housing_allowance == 0:
+                                        st.caption(f"💡 Requires Housing Allowance to auto-calculate")
+                                    else:
+                                        st.caption(f"💡 Will auto-calculate as 20% of Basic Salary")
+                            else:
+                                payment_value = st.number_input(f"Rate ({currency_symbol})", key=f"payment_value_{i}", 
+                                                              value=float(item["value"]), min_value=0.0, step=10.0)
                         
-                        if payment_name.strip() and not remove_payment:
-                            payment_dict[payment_name.strip()] = payment_value
+                        if payment_name.strip():
+                            # For auto-calculated Geographic Coefficient, ensure we use the calculated value
+                            if "Geographic Coefficient" in payment_name and monthly_basic_salary > 0:
+                                # Get Housing Allowance value to check if auto-calculation should apply
+                                housing_allowance = 0.0
+                                for j, housing_item in enumerate(st.session_state.payment_items):
+                                    if "Housing Allowance" in housing_item["name"]:
+                                        housing_key = f"payment_value_{j}"
+                                        if housing_key in st.session_state:
+                                            housing_allowance = st.session_state[housing_key]
+                                        break
+                                
+                                # Use auto-calculated value if both conditions are met
+                                if housing_allowance > 0:
+                                    payment_dict[payment_name.strip()] = monthly_basic_salary * 0.2
+                                else:
+                                    payment_dict[payment_name.strip()] = payment_value
+                            else:
+                                payment_dict[payment_name.strip()] = payment_value
                     
                     st.markdown("### ➖ Deduction Categories")
                     
-                    # Get basic salary for percentage calculations
-                    basic_salary = 0.0
-                    for name, value in payment_dict.items():
-                        if 'basic' in name.lower() or 'salary' in name.lower():
-                            basic_salary = value
-                            break
+                    # Use the monthly basic salary for percentage calculations
+                    basic_salary = monthly_basic_salary
                     
                     if basic_salary > 0:
                         st.info(f"📊 Basic Salary: {currency_symbol}{basic_salary:,.2f} - Deductions calculated as percentages")
                     else:
-                        st.warning("⚠️ No basic salary found. Add a payment with 'salary' or 'basic' in the name.")
+                        st.warning("⚠️ Please enter Monthly Basic Salary to calculate deductions.")
                     
-                    # Initialize session state for deductions
+                    # Initialize session state for deductions with default deduction categories
                     if 'deduction_items' not in st.session_state:
-                        st.session_state.deduction_items = []
+                        # Default deduction categories
+                        st.session_state.deduction_items = [
+                            {"name": "Monthly EMBO", "percentage": 13.0, "formula": "basic_salary+geographic_coefficient+relocation"},
+                            {"name": "Monthly EE Pension Contribution", "percentage": 8.0, "formula": "basic_salary+stip_bonus"}
+                        ]
                     
                     # Deduction section with percentage input
                     deduction_dict = {}
                     for i, item in enumerate(st.session_state.deduction_items):
-                        col_name, col_percentage, col_amount, col_remove = st.columns([3, 1.5, 2, 0.8])
+                        col_name, col_percentage, col_amount = st.columns([3, 1.5, 2])
                         with col_name:
-                            deduction_name = st.text_input(f"Category", key=f"deduction_name_{i}", 
-                                                         value=item["name"], placeholder="e.g., tax")
+                            # Display category name as read-only text
+                            st.markdown(f"**{item['name']}**")
+                            deduction_name = item["name"]  # Use the fixed name from session state
                         with col_percentage:
                             deduction_percentage = st.number_input(f"Percentage (%)", key=f"deduction_percentage_{i}", 
                                                                  value=float(item.get("percentage", 0.0)), min_value=0.0, max_value=100.0, step=0.5)
                         with col_amount:
-                            # Calculate amount based on percentage
-                            calculated_amount = (basic_salary * deduction_percentage / 100) if basic_salary > 0 else 0.0
-                            st.markdown(f"**{currency_symbol}{calculated_amount:,.2f}**")
-                            st.caption(f"= {deduction_percentage}% of basic salary")
-                        with col_remove:
-                            remove_deduction = st.checkbox("❌", key=f"remove_deduction_{i}", help="Check to remove this deduction")
+                            # Calculate amount based on formula and percentage
+                            if item.get("formula") and basic_salary > 0:
+                                # Get values from payment_dict for calculations
+                                geographic_coefficient = payment_dict.get("Monthly Geographic Coefficient", 0)
+                                # Also check for old spelling for backward compatibility
+                                if geographic_coefficient == 0:
+                                    geographic_coefficient = payment_dict.get("Monthly Geographic Coeffient", 0)
+                                relocation = payment_dict.get("Monthly Relocation", 0)
+                                stip_bonus = payment_dict.get("STIP Bonus", 0)
+                                
+                                if item["formula"] == "basic_salary+geographic_coefficient+relocation":
+                                    # Only calculate EMBO if BOTH geographic coefficient AND relocation have values
+                                    if geographic_coefficient > 0 and relocation > 0:
+                                        base_amount = basic_salary + geographic_coefficient + relocation
+                                        calculated_amount = base_amount * deduction_percentage / 100
+                                        st.markdown(f"**{currency_symbol}{calculated_amount:,.2f}**")
+                                        st.caption(f"= {deduction_percentage}% of ({currency_symbol}{basic_salary:,.2f} + {currency_symbol}{geographic_coefficient:,.2f} + {currency_symbol}{relocation:,.2f}) = {currency_symbol}{base_amount:,.2f}")
+                                    else:
+                                        calculated_amount = 0.0
+                                        st.markdown(f"**{currency_symbol}0.00**")
+                                        st.caption("EMBO requires BOTH Geographic Coefficient AND Relocation")
+                                elif item["formula"] == "basic_salary+stip_bonus":
+                                    base_amount = basic_salary + stip_bonus
+                                    calculated_amount = base_amount * deduction_percentage / 100
+                                    st.markdown(f"**{currency_symbol}{calculated_amount:,.2f}**")
+                                    st.caption(f"= {deduction_percentage}% of (Basic + STIP Bonus)")
+                                else:
+                                    calculated_amount = (basic_salary * deduction_percentage / 100) if basic_salary > 0 else 0.0
+                                    st.markdown(f"**{currency_symbol}{calculated_amount:,.2f}**")
+                                    st.caption(f"= {deduction_percentage}% of basic salary")
+                            else:
+                                # Standard calculation for custom deductions
+                                calculated_amount = (basic_salary * deduction_percentage / 100) if basic_salary > 0 else 0.0
+                                st.markdown(f"**{currency_symbol}{calculated_amount:,.2f}**")
+                                st.caption(f"= {deduction_percentage}% of basic salary")
                         
-                        if deduction_name.strip() and not remove_deduction and basic_salary > 0:
-                            deduction_dict[deduction_name.strip()] = calculated_amount
+                        if deduction_name.strip():
+                            # For EMBO, only add if both Geographic Coefficient and Relocation have values
+                            if deduction_name.strip() == "Monthly EMBO":
+                                geographic_coefficient = payment_dict.get("Monthly Geographic Coefficient", 0)
+                                # Also check for old spelling for backward compatibility
+                                if geographic_coefficient == 0:
+                                    geographic_coefficient = payment_dict.get("Monthly Geographic Coeffient", 0)
+                                relocation = payment_dict.get("Monthly Relocation", 0)
+                                
+                                # Only add EMBO if both conditions are met (regardless of calculated amount)
+                                if geographic_coefficient > 0 and relocation > 0:
+                                    deduction_dict[deduction_name.strip()] = calculated_amount
+                            else:
+                                deduction_dict[deduction_name.strip()] = calculated_amount
                             # Update session state with percentage
                             st.session_state.deduction_items[i]["percentage"] = deduction_percentage
                     
+                    st.markdown("### ➖ Additional Deduction")
+                    
+                    # Calculate Monthly ER Pension Contribution (editable percentage of basic_salary + stip_bonus)
+                    if basic_salary > 0:
+                        stip_bonus = payment_dict.get("STIP Bonus", 0)
+                        er_pension_base = basic_salary + stip_bonus
+                        
+                        col_er_name, col_er_percentage, col_er_amount = st.columns([3, 1.5, 2])
+                        with col_er_name:
+                            st.markdown("**Monthly ER Pension Contribution**")
+                        with col_er_percentage:
+                            er_pension_percentage = st.number_input("Percentage (%)", value=6.5, min_value=0.0, max_value=100.0, step=0.5, key="er_pension_percentage")
+                        with col_er_amount:
+                            er_pension_amount = er_pension_base * er_pension_percentage / 100
+                            st.markdown(f"**{currency_symbol}{er_pension_amount:,.2f}**")
+                            st.caption(f"= {er_pension_percentage}% of (Basic + STIP Bonus)")
+                        
+                        # Add to deduction_dict
+                        deduction_dict["Monthly ER Pension Contribution"] = er_pension_amount
+                        
+                    else:
+                        st.warning("⚠️ Please enter Monthly Basic Salary to calculate ER Pension Contribution.")
+                        
+                        # Show in table format similar to deduction categories when basic salary is not available
+                        col_er_name, col_er_percentage, col_er_amount = st.columns([3, 1.5, 2])
+                        with col_er_name:
+                            st.markdown("**Monthly ER Pension Contribution**")
+                        with col_er_percentage:
+                            er_pension_percentage = st.number_input("Percentage (%)", value=6.5, min_value=0.0, max_value=100.0, step=0.5, key="er_pension_percentage_empty")
+                        with col_er_amount:
+                            st.markdown(f"**{currency_symbol}0.00**")
+                            st.caption(f"= {er_pension_percentage}% of (Basic + STIP Bonus)")
+                        
+                    
                     st.markdown("### 💰 Additional Daily Payments")
                     
-                    # Initialize session state for additional daily payments
+                    # Initialize session state for additional daily payments with default categories
                     if 'additional_daily_items' not in st.session_state:
-                        st.session_state.additional_daily_items = []
+                        # Default additional daily payment categories
+                        st.session_state.additional_daily_items = [
+                            {"name": "Field Bonus / Job Bonus in Country", "value": 0.0},
+                            {"name": "Rotation Premium - In country", "value": 0.0},
+                            {"name": "Standby Rate - In country", "value": 0.0},
+                            {"name": "Wellsite Rate In country", "value": 0.0}
+                        ]
                     
                     # Additional Daily Payments section
                     additional_payments = {}
                     for i, item in enumerate(st.session_state.additional_daily_items):
-                        col_name, col_value, col_remove = st.columns([3, 2, 0.8])
+                        col_name, col_value = st.columns([3, 2])
                         with col_name:
-                            daily_payment_name = st.text_input(f"Category", key=f"daily_payment_name_{i}", 
-                                                       value=item["name"], placeholder="e.g., Field Bonus")
+                            # Display category name as read-only text
+                            st.markdown(f"**{item['name']}**")
+                            daily_payment_name = item["name"]  # Use the fixed name from session state
                         with col_value:
                             daily_payment_value = st.number_input(f"Daily Rate ({currency_symbol})", key=f"daily_payment_value_{i}", 
                                                           value=float(item["value"]), min_value=0.0, step=1.0)
-                        with col_remove:
-                            remove_daily_payment = st.checkbox("❌", key=f"remove_daily_payment_{i}", help="Check to remove this daily payment")
                         
-                        if daily_payment_name.strip() and not remove_daily_payment:
+                        if daily_payment_name.strip():
                             additional_payments[daily_payment_name.strip()] = daily_payment_value
                 
                 # Form buttons
@@ -463,8 +791,8 @@ with tab1:
                     st.session_state.additional_daily_items = [item for i, item in enumerate(st.session_state.additional_daily_items) 
                                                              if not st.session_state.get(f"remove_daily_payment_{i}", False)]
                     
-                    if new_emp_id and new_emp_name and employment_type and currency:
-                        success, message = add_employee(new_emp_id, new_emp_name, employment_type, currency, payment_dict, deduction_dict)
+                    if new_emp_id and new_emp_name and employment_type and currency and monthly_basic_salary > 0:
+                        success, message = add_employee(new_emp_id, new_emp_name, employment_type, currency, monthly_basic_salary, payment_dict, deduction_dict)
                         
                         if success:
                             if any(value > 0 for value in additional_payments.values()):
@@ -485,20 +813,50 @@ with tab1:
                             else:
                                 st.success(message)
                             
-                            st.session_state.payment_items = []
-                            st.session_state.deduction_items = []
-                            st.session_state.additional_daily_items = []
+                            # Reset to default categories after successful save
+                            st.session_state.payment_items = [
+                                {"name": "Monthly Transport Allowance", "value": 0.0},
+                                {"name": "Monthly Housing Allowance", "value": 0.0},
+                                {"name": "Monthly Geographic Coefficient", "value": 0.0, "auto_calculate": True, "percentage": 20.0},
+                                {"name": "Monthly Relocation", "value": 0.0},
+                                {"name": "STIP Bonus", "value": 0.0}
+                            ]
+                            st.session_state.deduction_items = [
+                                {"name": "Monthly EMBO", "percentage": 13.0, "formula": "basic_salary+geographic_coefficient+relocation"},
+                                {"name": "Monthly EE Pension Contribution", "percentage": 8.0, "formula": "basic_salary+stip_bonus"}
+                            ]
+                            st.session_state.additional_daily_items = [
+                                {"name": "Field Bonus / Job Bonus in Country", "value": 0.0},
+                                {"name": "Rotation Premium - In country", "value": 0.0},
+                                {"name": "Standby Rate - In country", "value": 0.0},
+                                {"name": "Wellsite Rate In country", "value": 0.0}
+                            ]
                             st.session_state['show_add_employee_form'] = False
                             st.rerun()
                         else:
                             st.error(message)
                     else:
-                        st.error("Please fill in all required fields (marked with *)")
+                        st.error("Please fill in all required fields (marked with *) and ensure Monthly Basic Salary is greater than 0")
                 
                 if cancel_button:
-                    st.session_state.payment_items = []
-                    st.session_state.deduction_items = []
-                    st.session_state.additional_daily_items = []
+                    # Reset to default categories
+                    st.session_state.payment_items = [
+                        {"name": "Monthly Transport Allowance", "value": 0.0},
+                        {"name": "Monthly Housing Allowance", "value": 0.0},
+                        {"name": "Monthly Geographic Coefficient", "value": 0.0, "auto_calculate": True, "percentage": 20.0},
+                        {"name": "Monthly Relocation", "value": 0.0},
+                        {"name": "STIP Bonus", "value": 0.0}
+                    ]
+                    st.session_state.deduction_items = [
+                        {"name": "Monthly EMBO", "percentage": 13.0, "formula": "basic_salary+geographic_coefficient+relocation"},
+                        {"name": "Monthly EE Pension Contribution", "percentage": 8.0, "formula": "basic_salary+stip_bonus"}
+                    ]
+                    st.session_state.additional_daily_items = [
+                        {"name": "Field Bonus / Job Bonus in Country", "value": 0.0},
+                        {"name": "Rotation Premium - In country", "value": 0.0},
+                        {"name": "Standby Rate - In country", "value": 0.0},
+                        {"name": "Wellsite Rate In country", "value": 0.0}
+                    ]
                     st.session_state['show_add_employee_form'] = False
                     st.rerun()
             
@@ -520,6 +878,30 @@ with tab1:
                     st.markdown(f"**Employment Type:** {emp['employment_type']}")
                     currency_symbol = get_currency_symbol(emp.get('currency', 'EUR'))
                     st.markdown(f"**Currency:** {emp.get('currency', 'EUR')} ({currency_symbol})")
+                    
+                    # Handle monthly_basic_salary with proper type checking
+                    monthly_salary = emp.get('monthly_basic_salary', 0)
+                    try:
+                        if isinstance(monthly_salary, str):
+                            # If it's a string, try to parse as JSON first, then as float
+                            try:
+                                import json
+                                salary_data = json.loads(monthly_salary)
+                                if isinstance(salary_data, dict) and 'basic salary' in salary_data:
+                                    monthly_salary = salary_data['basic salary']
+                                else:
+                                    monthly_salary = 0.0
+                            except (json.JSONDecodeError, KeyError):
+                                try:
+                                    monthly_salary = float(monthly_salary)
+                                except ValueError:
+                                    monthly_salary = 0.0
+                        else:
+                            monthly_salary = float(monthly_salary) if monthly_salary is not None else 0.0
+                    except (ValueError, TypeError):
+                        monthly_salary = 0.0
+                    
+                    st.markdown(f"**Monthly Basic Salary:** {currency_symbol}{monthly_salary:,.2f}")
                     st.markdown(f"**Created:** {emp['created_at'][:10] if emp['created_at'] else 'Unknown'}")
                 
                 with col2:
@@ -530,12 +912,56 @@ with tab1:
                         total_payments = 0
                         if isinstance(emp['payments'], dict):
                             payment_data = []
-                            for payment_name, payment_value in emp['payments'].items():
-                                payment_data.append({
-                                    'Category': payment_name,
-                                    'Amount': f"{currency_symbol}{payment_value:,.2f}"
-                                })
-                                total_payments += payment_value
+                            # Clean up duplicate Geographic Coefficient entries
+                            cleaned_payments = dict(emp['payments'])
+                            if "Monthly Geographic Coeffient" in cleaned_payments and "Monthly Geographic Coefficient" in cleaned_payments:
+                                # If both exist, remove the old spelling
+                                del cleaned_payments["Monthly Geographic Coeffient"]
+                            elif "Monthly Geographic Coeffient" in cleaned_payments:
+                                # If only old spelling exists, rename it to new spelling
+                                cleaned_payments["Monthly Geographic Coefficient"] = cleaned_payments["Monthly Geographic Coeffient"]
+                                del cleaned_payments["Monthly Geographic Coeffient"]
+                            
+                            # Auto-calculate Monthly Geographic Coefficient if basic salary and housing allowance exist
+                            monthly_salary = emp.get('monthly_basic_salary', 0)
+                            if isinstance(monthly_salary, str):
+                                try:
+                                    monthly_salary = float(monthly_salary)
+                                except ValueError:
+                                    monthly_salary = 0.0
+                            
+                            housing_allowance = cleaned_payments.get("Monthly Housing Allowance", 0)
+                            if monthly_salary > 0 and housing_allowance > 0 and "Monthly Geographic Coefficient" in cleaned_payments:
+                                # Auto-calculate as 20% of basic salary only if housing allowance is also present
+                                cleaned_payments["Monthly Geographic Coefficient"] = monthly_salary * 0.2
+                            
+                            # Define display order to ensure Geographic Coefficient is 3rd
+                            display_order = [
+                                "Monthly Transport Allowance",
+                                "Monthly Housing Allowance", 
+                                "Monthly Geographic Coefficient",
+                                "Monthly Relocation",
+                                "STIP Bonus"
+                            ]
+                            
+                            # Add payments in the specified order
+                            for payment_name in display_order:
+                                if payment_name in cleaned_payments:
+                                    payment_value = cleaned_payments[payment_name]
+                                    payment_data.append({
+                                        'Category': payment_name,
+                                        'Amount': f"{currency_symbol}{payment_value:,.2f}"
+                                    })
+                                    total_payments += payment_value
+                            
+                            # Add any remaining payments not in the standard order
+                            for payment_name, payment_value in cleaned_payments.items():
+                                if payment_name not in display_order:
+                                    payment_data.append({
+                                        'Category': payment_name,
+                                        'Amount': f"{currency_symbol}{payment_value:,.2f}"
+                                    })
+                                    total_payments += payment_value
                             
                             if payment_data:
                                 payment_df = pd.DataFrame(payment_data)
@@ -559,21 +985,37 @@ with tab1:
                                     break
                         
                         if isinstance(emp['deductions'], dict):
-                            deduction_data = []
-                            for deduction_name, deduction_value in emp['deductions'].items():
-                                percentage_info = ""
-                                if display_basic_salary > 0:
-                                    percentage = (deduction_value / display_basic_salary) * 100
-                                    percentage_info = f"{percentage:.1f}%"
-                                else:
-                                    percentage_info = "N/A"
+                            # Auto-calculate Monthly EMBO if basic salary, geographic coefficient, or relocation exist
+                            cleaned_deductions = dict(emp['deductions'])
+                            monthly_salary = emp.get('monthly_basic_salary', 0)
+                            if isinstance(monthly_salary, str):
+                                try:
+                                    monthly_salary = float(monthly_salary)
+                                except ValueError:
+                                    monthly_salary = 0.0
+                            
+                            if emp['payments'] and isinstance(emp['payments'], dict):
+                                geographic_coefficient = emp['payments'].get("Monthly Geographic Coefficient", 0)
+                                # Also check for old spelling for backward compatibility
+                                if geographic_coefficient == 0:
+                                    geographic_coefficient = emp['payments'].get("Monthly Geographic Coeffient", 0)
+                                relocation = emp['payments'].get("Monthly Relocation", 0)
                                 
-                                deduction_data.append({
-                                    'Category': deduction_name,
-                                    'Amount': f"{currency_symbol}{deduction_value:,.2f}",
-                                    'Percentage': percentage_info
-                                })
-                                total_deductions += deduction_value
+                                # Auto-calculate EMBO only if BOTH geographic coefficient AND relocation have values
+                                if (geographic_coefficient > 0 and relocation > 0) and "Monthly EMBO" in cleaned_deductions:
+                                    embo_base = monthly_salary + geographic_coefficient + relocation
+                                    embo_amount = embo_base * 13.0 / 100
+                                    cleaned_deductions["Monthly EMBO"] = embo_amount
+                            
+                            deduction_data = []
+                            for deduction_name, deduction_value in cleaned_deductions.items():
+                                # Exclude ER Pension Contribution from regular deductions display
+                                if deduction_name != "Monthly ER Pension Contribution":
+                                    deduction_data.append({
+                                        'Category': deduction_name,
+                                        'Amount': f"{currency_symbol}{deduction_value:,.2f}"
+                                    })
+                                    total_deductions += deduction_value
                             
                             if deduction_data:
                                 deduction_df = pd.DataFrame(deduction_data)
@@ -584,6 +1026,40 @@ with tab1:
                             for deduction in emp['deductions']:
                                 st.markdown(f"• {deduction}")
                             st.markdown("*Note: Old format - no amounts stored*")
+                    
+                    # Additional Deduction - Monthly ER Pension Contribution (auto-calculated)
+                    st.markdown("**Additional Deduction:**")
+                    monthly_salary = emp.get('monthly_basic_salary', 0)
+                    if isinstance(monthly_salary, str):
+                        try:
+                            monthly_salary = float(monthly_salary)
+                        except ValueError:
+                            monthly_salary = 0.0
+                    
+                    stip_bonus = 0.0
+                    if emp['payments'] and isinstance(emp['payments'], dict):
+                        stip_bonus = emp['payments'].get("STIP Bonus", 0.0)
+                    
+                    if monthly_salary > 0:
+                        er_pension_base = monthly_salary + stip_bonus
+                        er_pension_amount = er_pension_base * 6.5 / 100
+                        
+                        additional_deduction_data = [{
+                            'Category': 'Monthly ER Pension Contribution',
+                            'Amount': f"{currency_symbol}{er_pension_amount:,.2f}"
+                        }]
+                        
+                        additional_deduction_df = pd.DataFrame(additional_deduction_data)
+                        st.dataframe(additional_deduction_df, use_container_width=True, hide_index=True)
+                    else:
+                        # Show empty table format similar to deduction categories
+                        empty_additional_deduction_data = [{
+                            'Category': 'Monthly ER Pension Contribution',
+                            'Amount': f"{currency_symbol}0.00"
+                        }]
+                        
+                        empty_additional_deduction_df = pd.DataFrame(empty_additional_deduction_data)
+                        st.dataframe(empty_additional_deduction_df, use_container_width=True, hide_index=True)
                     
                     if emp.get('additional_daily_payments'):
                         st.markdown("**Additional Daily Payments:**")
@@ -635,20 +1111,7 @@ with tab1:
                     if f"edit_new_daily_payments_{emp['id']}" not in st.session_state:
                         st.session_state[f"edit_new_daily_payments_{emp['id']}"] = []
                     
-                    # Buttons to add new categories (outside form)
-                    col_add_pay, col_add_ded, col_add_daily, col_space = st.columns([1, 1, 1, 1])
-                    with col_add_pay:
-                        if st.button("➕ Add New Payment", key=f"add_new_payment_{emp['id']}"):
-                            st.session_state[f"edit_new_payments_{emp['id']}"].append({"name": "", "value": 0.0})
-                            st.rerun()
-                    with col_add_ded:
-                        if st.button("➕ Add New Deduction", key=f"add_new_deduction_{emp['id']}"):
-                            st.session_state[f"edit_new_deductions_{emp['id']}"].append({"name": "", "percentage": 0.0})
-                            st.rerun()
-                    with col_add_daily:
-                        if st.button("➕ Add Daily Payment", key=f"add_new_daily_{emp['id']}"):
-                            st.session_state[f"edit_new_daily_payments_{emp['id']}"].append({"name": "", "value": 0.0})
-                            st.rerun()
+
                     
                     with st.form(f"edit_form_{emp['id']}"):
                         edit_col1, edit_col2 = st.columns(2)
@@ -681,6 +1144,36 @@ with tab1:
                                 )
                             
                             edit_currency_symbol = get_currency_symbol(edit_currency)
+                            
+                            # Handle monthly_basic_salary with proper type checking for edit form
+                            current_monthly_salary = emp.get('monthly_basic_salary', 0)
+                            try:
+                                if isinstance(current_monthly_salary, str):
+                                    # If it's a string, try to parse as JSON first, then as float
+                                    try:
+                                        import json
+                                        salary_data = json.loads(current_monthly_salary)
+                                        if isinstance(salary_data, dict) and 'basic salary' in salary_data:
+                                            current_monthly_salary = salary_data['basic salary']
+                                        else:
+                                            current_monthly_salary = 0.0
+                                    except (json.JSONDecodeError, KeyError):
+                                        try:
+                                            current_monthly_salary = float(current_monthly_salary)
+                                        except ValueError:
+                                            current_monthly_salary = 0.0
+                                else:
+                                    current_monthly_salary = float(current_monthly_salary) if current_monthly_salary is not None else 0.0
+                            except (ValueError, TypeError):
+                                current_monthly_salary = 0.0
+                            
+                            # Monthly Basic Salary field
+                            edit_monthly_basic_salary = st.number_input(
+                                f"Monthly Basic Salary ({edit_currency_symbol})", 
+                                value=current_monthly_salary,
+                                min_value=0.0, step=100.0,
+                                key=f"edit_monthly_basic_salary_{emp['id']}"
+                            )
                         
                         with edit_col2:
                             st.markdown(f"**Edit Payment Categories ({edit_currency_symbol}):**")
@@ -690,29 +1183,29 @@ with tab1:
                             # Handle both old list format and new dict format
                             if isinstance(emp['payments'], dict):
                                 for payment_name, payment_value in emp['payments'].items():
-                                    col_name, col_value, col_delete = st.columns([2, 1, 0.8])
+                                    col_name, col_value = st.columns([2, 1])
                                     with col_name:
-                                        new_payment_name = st.text_input(f"Category", value=payment_name, key=f"edit_payment_name_{emp['id']}_{payment_index}")
+                                        # Display category name as read-only text
+                                        st.markdown(f"**{payment_name}**")
+                                        new_payment_name = payment_name  # Use the existing name, don't allow editing
                                     with col_value:
                                         new_payment_value = st.number_input(f"Rate ({edit_currency_symbol})", value=float(payment_value), min_value=0.0, step=10.0, key=f"edit_payment_value_{emp['id']}_{payment_index}")
-                                    with col_delete:
-                                        delete_payment = st.checkbox("❌", key=f"delete_payment_{emp['id']}_{payment_index}", help="Check to delete this payment")
                                     
-                                    if new_payment_name.strip() and not delete_payment:
+                                    if new_payment_name.strip():
                                         edit_payments[new_payment_name.strip()] = new_payment_value
                                     payment_index += 1
                             else:
                                 # Convert old list format to dict format
                                 for payment_name in emp['payments']:
-                                    col_name, col_value, col_delete = st.columns([2, 1, 0.8])
+                                    col_name, col_value = st.columns([2, 1])
                                     with col_name:
-                                        new_payment_name = st.text_input(f"Category", value=payment_name, key=f"edit_payment_name_{emp['id']}_{payment_index}")
+                                        # Display category name as read-only text
+                                        st.markdown(f"**{payment_name}**")
+                                        new_payment_name = payment_name  # Use the existing name, don't allow editing
                                     with col_value:
                                         new_payment_value = st.number_input(f"Rate ({edit_currency_symbol})", value=0.0, min_value=0.0, step=10.0, key=f"edit_payment_value_{emp['id']}_{payment_index}")
-                                    with col_delete:
-                                        delete_payment = st.checkbox("❌", key=f"delete_payment_{emp['id']}_{payment_index}", help="Check to delete this payment")
                                     
-                                    if new_payment_name.strip() and not delete_payment:
+                                    if new_payment_name.strip():
                                         edit_payments[new_payment_name.strip()] = new_payment_value
                                     payment_index += 1
                             
@@ -720,79 +1213,185 @@ with tab1:
                             if st.session_state[f"edit_new_payments_{emp['id']}"]:
                                 st.markdown("**New Payment Categories:**")
                                 for i, new_payment in enumerate(st.session_state[f"edit_new_payments_{emp['id']}"]):
-                                    col_name, col_value, col_remove = st.columns([2, 1, 0.8])
+                                    col_name, col_value = st.columns([2, 1])
                                     with col_name:
                                         new_payment_name = st.text_input(f"New Category", key=f"new_payment_name_{emp['id']}_{i}", 
                                                                        value=new_payment["name"], placeholder="e.g., bonus")
                                     with col_value:
                                         new_payment_value = st.number_input(f"Rate ({edit_currency_symbol})", key=f"new_payment_value_{emp['id']}_{i}", 
                                                                           value=float(new_payment["value"]), min_value=0.0, step=10.0)
-                                    with col_remove:
-                                        remove_new_payment = st.checkbox("❌", key=f"remove_new_payment_{emp['id']}_{i}", help="Check to remove this new payment")
                                     
-                                    if new_payment_name.strip() and not remove_new_payment:
+                                    if new_payment_name.strip():
                                         edit_payments[new_payment_name.strip()] = new_payment_value
+                            
+                            # Auto-calculate Monthly Geographic Coefficient for edit form
+                            housing_allowance = edit_payments.get("Monthly Housing Allowance", 0)
+                            if edit_monthly_basic_salary > 0 and housing_allowance > 0 and "Monthly Geographic Coefficient" in edit_payments:
+                                edit_payments["Monthly Geographic Coefficient"] = edit_monthly_basic_salary * 0.2
                             
                             st.markdown(f"**Edit Deduction Categories ({edit_currency_symbol}):**")
                             
-                            # Get basic salary for percentage calculations in edit mode
-                            edit_basic_salary = 0.0
-                            for payment_name, payment_value in edit_payments.items():
-                                if 'basic' in payment_name.lower() or 'salary' in payment_name.lower():
-                                    edit_basic_salary = payment_value
-                                    break
+                            # Use the monthly basic salary for percentage calculations in edit mode
+                            edit_basic_salary = edit_monthly_basic_salary
                             
                             if edit_basic_salary > 0:
                                 st.info(f"📊 Basic Salary: {edit_currency_symbol}{edit_basic_salary:,.2f} - Deductions calculated as percentages")
                             else:
-                                st.warning("⚠️ No basic salary found. Add a payment with 'salary' or 'basic' in the name.")
+                                st.warning("⚠️ Please enter Monthly Basic Salary to calculate deductions.")
                             
                             edit_deductions = {}
                             deduction_index = 0
                             
+                            # Auto-calculate Monthly EMBO if basic salary, geographic coefficient, or relocation exist
+                            cleaned_deductions = dict(emp['deductions']) if isinstance(emp['deductions'], dict) else {}
+                            if isinstance(emp['deductions'], dict):
+                                geographic_coefficient = edit_payments.get("Monthly Geographic Coefficient", 0)
+                                # Also check for old spelling for backward compatibility
+                                if geographic_coefficient == 0:
+                                    geographic_coefficient = edit_payments.get("Monthly Geographic Coeffient", 0)
+                                relocation = edit_payments.get("Monthly Relocation", 0)
+                                
+                                # Always recalculate EMBO based on current logic
+                                if "Monthly EMBO" in cleaned_deductions:
+                                    if geographic_coefficient > 0 and relocation > 0:
+                                        embo_base = edit_monthly_basic_salary + geographic_coefficient + relocation
+                                        embo_amount = embo_base * 13.0 / 100
+                                        cleaned_deductions["Monthly EMBO"] = embo_amount
+                                    else:
+                                        # Set EMBO to 0 if BOTH geographic coefficient AND relocation don't have values
+                                        cleaned_deductions["Monthly EMBO"] = 0.0
+                            
                             # Handle both old list format and new dict format
                             if isinstance(emp['deductions'], dict):
-                                for deduction_name, deduction_value in emp['deductions'].items():
-                                    col_name, col_percentage, col_amount, col_delete = st.columns([2, 1, 1.5, 0.8])
+                                for deduction_name, deduction_value in cleaned_deductions.items():
+                                    # Skip ER Pension Contribution as it's handled in Additional Deduction section
+                                    if deduction_name == "Monthly ER Pension Contribution":
+                                        continue
+                                        
+                                    col_name, col_percentage, col_amount = st.columns([2, 1, 1.5])
                                     with col_name:
-                                        new_deduction_name = st.text_input(f"Category", value=deduction_name, key=f"edit_deduction_name_{emp['id']}_{deduction_index}")
+                                        # Display category name as read-only text
+                                        st.markdown(f"**{deduction_name}**")
+                                        new_deduction_name = deduction_name  # Use the existing name, don't allow editing
                                     with col_percentage:
-                                        existing_percentage = (deduction_value / edit_basic_salary * 100) if edit_basic_salary > 0 and deduction_value > 0 else 0.0
+                                        # Calculate existing percentage more intelligently based on deduction type
+                                        if deduction_name == "Monthly EMBO":
+                                            # For EMBO, calculate percentage based on (Basic + Geographic + Relocation)
+                                            geographic_coefficient = edit_payments.get("Monthly Geographic Coefficient", 0)
+                                            # Also check for old spelling for backward compatibility
+                                            if geographic_coefficient == 0:
+                                                geographic_coefficient = edit_payments.get("Monthly Geographic Coeffient", 0)
+                                            relocation = edit_payments.get("Monthly Relocation", 0)
+                                            base_amount = edit_basic_salary + geographic_coefficient + relocation
+                                            existing_percentage = (deduction_value / base_amount * 100) if base_amount > 0 and deduction_value > 0 else 13.0
+                                        elif deduction_name == "Monthly EE Pension Contribution":
+                                            # For Pension, calculate percentage based on (Basic + STIP Bonus)
+                                            stip_bonus = edit_payments.get("STIP Bonus", 0)
+                                            base_amount = edit_basic_salary + stip_bonus
+                                            existing_percentage = (deduction_value / base_amount * 100) if base_amount > 0 and deduction_value > 0 else 8.0
+                                        else:
+                                            # Standard percentage calculation for other deductions
+                                            existing_percentage = (deduction_value / edit_basic_salary * 100) if edit_basic_salary > 0 and deduction_value > 0 else 0.0
+                                        
                                         new_deduction_percentage = st.number_input(f"Percentage (%)", value=existing_percentage, min_value=0.0, max_value=100.0, step=0.5, key=f"edit_deduction_percentage_{emp['id']}_{deduction_index}")
                                     with col_amount:
-                                        calculated_amount = (edit_basic_salary * new_deduction_percentage / 100) if edit_basic_salary > 0 else 0.0
-                                        st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
-                                        st.caption(f"= {new_deduction_percentage}% of basic")
-                                    with col_delete:
-                                        delete_deduction = st.checkbox("❌", key=f"delete_deduction_{emp['id']}_{deduction_index}", help="Check to delete this deduction")
+                                        # Calculate amount based on formula and percentage (same as add employee form)
+                                        if deduction_name == "Monthly EMBO":
+                                            # For EMBO: percentage of (Basic + Geographic + Relocation)
+                                            geographic_coefficient = edit_payments.get("Monthly Geographic Coefficient", 0)
+                                            # Also check for old spelling for backward compatibility
+                                            if geographic_coefficient == 0:
+                                                geographic_coefficient = edit_payments.get("Monthly Geographic Coeffient", 0)
+                                            relocation = edit_payments.get("Monthly Relocation", 0)
+                                            base_amount = edit_basic_salary + geographic_coefficient + relocation
+                                            calculated_amount = base_amount * new_deduction_percentage / 100
+                                            st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
+                                            st.caption(f"= {new_deduction_percentage}% of ({edit_currency_symbol}{edit_basic_salary:,.2f} + {edit_currency_symbol}{geographic_coefficient:,.2f} + {edit_currency_symbol}{relocation:,.2f}) = {edit_currency_symbol}{base_amount:,.2f}")
+                                        elif deduction_name == "Monthly EE Pension Contribution":
+                                            # For Pension: percentage of (Basic + STIP Bonus)
+                                            stip_bonus = edit_payments.get("STIP Bonus", 0)
+                                            base_amount = edit_basic_salary + stip_bonus
+                                            calculated_amount = base_amount * new_deduction_percentage / 100
+                                            st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
+                                            st.caption(f"= {new_deduction_percentage}% of (Basic + STIP Bonus)")
+                                        else:
+                                            # Standard calculation for other deductions
+                                            calculated_amount = (edit_basic_salary * new_deduction_percentage / 100) if edit_basic_salary > 0 else 0.0
+                                            st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
+                                            st.caption(f"= {new_deduction_percentage}% of basic salary")
                                     
-                                    if new_deduction_name.strip() and not delete_deduction and edit_basic_salary > 0:
-                                        edit_deductions[new_deduction_name.strip()] = calculated_amount
+                                    if new_deduction_name.strip():
+                                        # For EMBO, only add if both Geographic Coefficient and Relocation have values
+                                        if new_deduction_name.strip() == "Monthly EMBO":
+                                            geographic_coefficient = edit_payments.get("Monthly Geographic Coefficient", 0)
+                                            # Also check for old spelling for backward compatibility
+                                            if geographic_coefficient == 0:
+                                                geographic_coefficient = edit_payments.get("Monthly Geographic Coeffient", 0)
+                                            relocation = edit_payments.get("Monthly Relocation", 0)
+                                            
+                                            # Only add EMBO if both conditions are met (regardless of calculated amount)
+                                            if geographic_coefficient > 0 and relocation > 0:
+                                                edit_deductions[new_deduction_name.strip()] = calculated_amount
+                                        else:
+                                            edit_deductions[new_deduction_name.strip()] = calculated_amount
                                     deduction_index += 1
                             else:
                                 # Convert old list format to dict format with percentage input
                                 for deduction_name in emp['deductions']:
-                                    col_name, col_percentage, col_amount, col_delete = st.columns([2, 1, 1.5, 0.8])
+                                    col_name, col_percentage, col_amount = st.columns([2, 1, 1.5])
                                     with col_name:
-                                        new_deduction_name = st.text_input(f"Category", value=deduction_name, key=f"edit_deduction_name_{emp['id']}_{deduction_index}")
+                                        # Display category name as read-only text
+                                        st.markdown(f"**{deduction_name}**")
+                                        new_deduction_name = deduction_name  # Use the existing name, don't allow editing
                                     with col_percentage:
                                         new_deduction_percentage = st.number_input(f"Percentage (%)", value=0.0, min_value=0.0, max_value=100.0, step=0.5, key=f"edit_deduction_percentage_{emp['id']}_{deduction_index}")
                                     with col_amount:
-                                        calculated_amount = (edit_basic_salary * new_deduction_percentage / 100) if edit_basic_salary > 0 else 0.0
-                                        st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
-                                        st.caption(f"= {new_deduction_percentage}% of basic")
-                                    with col_delete:
-                                        delete_deduction = st.checkbox("❌", key=f"delete_deduction_{emp['id']}_{deduction_index}", help="Check to delete this deduction")
+                                        # Calculate amount based on formula and percentage (same as add employee form)
+                                        if new_deduction_name == "Monthly EMBO":
+                                            # For EMBO: percentage of (Basic + Geographic + Relocation)
+                                            geographic_coefficient = edit_payments.get("Monthly Geographic Coefficient", 0)
+                                            # Also check for old spelling for backward compatibility
+                                            if geographic_coefficient == 0:
+                                                geographic_coefficient = edit_payments.get("Monthly Geographic Coeffient", 0)
+                                            relocation = edit_payments.get("Monthly Relocation", 0)
+                                            base_amount = edit_basic_salary + geographic_coefficient + relocation
+                                            calculated_amount = base_amount * new_deduction_percentage / 100
+                                            st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
+                                            st.caption(f"= {new_deduction_percentage}% of ({edit_currency_symbol}{edit_basic_salary:,.2f} + {edit_currency_symbol}{geographic_coefficient:,.2f} + {edit_currency_symbol}{relocation:,.2f}) = {edit_currency_symbol}{base_amount:,.2f}")
+                                        elif new_deduction_name == "Monthly EE Pension Contribution":
+                                            # For Pension: percentage of (Basic + STIP Bonus)
+                                            stip_bonus = edit_payments.get("STIP Bonus", 0)
+                                            base_amount = edit_basic_salary + stip_bonus
+                                            calculated_amount = base_amount * new_deduction_percentage / 100
+                                            st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
+                                            st.caption(f"= {new_deduction_percentage}% of (Basic + STIP Bonus)")
+                                        else:
+                                            # Standard calculation for other deductions
+                                            calculated_amount = (edit_basic_salary * new_deduction_percentage / 100) if edit_basic_salary > 0 else 0.0
+                                            st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
+                                            st.caption(f"= {new_deduction_percentage}% of basic salary")
                                     
-                                    if new_deduction_name.strip() and not delete_deduction and edit_basic_salary > 0:
-                                        edit_deductions[new_deduction_name.strip()] = calculated_amount
+                                    if new_deduction_name.strip():
+                                        # For EMBO, only add if both Geographic Coefficient and Relocation have values
+                                        if new_deduction_name.strip() == "Monthly EMBO":
+                                            geographic_coefficient = edit_payments.get("Monthly Geographic Coefficient", 0)
+                                            # Also check for old spelling for backward compatibility
+                                            if geographic_coefficient == 0:
+                                                geographic_coefficient = edit_payments.get("Monthly Geographic Coeffient", 0)
+                                            relocation = edit_payments.get("Monthly Relocation", 0)
+                                            
+                                            # Only add EMBO if both conditions are met (regardless of calculated amount)
+                                            if geographic_coefficient > 0 and relocation > 0:
+                                                edit_deductions[new_deduction_name.strip()] = calculated_amount
+                                        else:
+                                            edit_deductions[new_deduction_name.strip()] = calculated_amount
                                     deduction_index += 1
                             
                             # Add new deduction categories
                             if st.session_state[f"edit_new_deductions_{emp['id']}"]:
                                 st.markdown("**New Deduction Categories:**")
                                 for i, new_deduction in enumerate(st.session_state[f"edit_new_deductions_{emp['id']}"]):
-                                    col_name, col_percentage, col_amount, col_remove = st.columns([2, 1, 1.5, 0.8])
+                                    col_name, col_percentage, col_amount = st.columns([2, 1, 1.5])
                                     with col_name:
                                         new_deduction_name = st.text_input(f"New Category", key=f"new_deduction_name_{emp['id']}_{i}", 
                                                                          value=new_deduction["name"], placeholder="e.g., insurance")
@@ -800,14 +1399,78 @@ with tab1:
                                         new_deduction_percentage = st.number_input(f"Percentage (%)", key=f"new_deduction_percentage_{emp['id']}_{i}", 
                                                                                  value=float(new_deduction.get("percentage", 0.0)), min_value=0.0, max_value=100.0, step=0.5)
                                     with col_amount:
-                                        calculated_amount = (edit_basic_salary * new_deduction_percentage / 100) if edit_basic_salary > 0 else 0.0
-                                        st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
-                                        st.caption(f"= {new_deduction_percentage}% of basic")
-                                    with col_remove:
-                                        remove_new_deduction = st.checkbox("❌", key=f"remove_new_deduction_{emp['id']}_{i}", help="Check to remove this new deduction")
+                                        # Calculate amount based on formula and percentage (same as add employee form)
+                                        if new_deduction_name.strip() == "Monthly EMBO":
+                                            # For EMBO: percentage of (Basic + Geographic + Relocation)
+                                            geographic_coefficient = edit_payments.get("Monthly Geographic Coefficient", 0)
+                                            # Also check for old spelling for backward compatibility
+                                            if geographic_coefficient == 0:
+                                                geographic_coefficient = edit_payments.get("Monthly Geographic Coeffient", 0)
+                                            relocation = edit_payments.get("Monthly Relocation", 0)
+                                            base_amount = edit_basic_salary + geographic_coefficient + relocation
+                                            calculated_amount = base_amount * new_deduction_percentage / 100
+                                            st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
+                                            st.caption(f"= {new_deduction_percentage}% of ({edit_currency_symbol}{edit_basic_salary:,.2f} + {edit_currency_symbol}{geographic_coefficient:,.2f} + {edit_currency_symbol}{relocation:,.2f}) = {edit_currency_symbol}{base_amount:,.2f}")
+                                        elif new_deduction_name.strip() == "Monthly EE Pension Contribution":
+                                            # For Pension: percentage of (Basic + STIP Bonus)
+                                            stip_bonus = edit_payments.get("STIP Bonus", 0)
+                                            base_amount = edit_basic_salary + stip_bonus
+                                            calculated_amount = base_amount * new_deduction_percentage / 100
+                                            st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
+                                            st.caption(f"= {new_deduction_percentage}% of (Basic + STIP Bonus)")
+                                        else:
+                                            # Standard calculation for other deductions
+                                            calculated_amount = (edit_basic_salary * new_deduction_percentage / 100) if edit_basic_salary > 0 else 0.0
+                                            st.markdown(f"**{edit_currency_symbol}{calculated_amount:,.2f}**")
+                                            st.caption(f"= {new_deduction_percentage}% of basic salary")
                                     
-                                    if new_deduction_name.strip() and not remove_new_deduction and edit_basic_salary > 0:
-                                        edit_deductions[new_deduction_name.strip()] = calculated_amount
+                                    if new_deduction_name.strip() and edit_basic_salary > 0:
+                                        # For EMBO, only add if both Geographic Coefficient and Relocation have values
+                                        if new_deduction_name.strip() == "Monthly EMBO":
+                                            geographic_coefficient = edit_payments.get("Monthly Geographic Coefficient", 0)
+                                            # Also check for old spelling for backward compatibility
+                                            if geographic_coefficient == 0:
+                                                geographic_coefficient = edit_payments.get("Monthly Geographic Coeffient", 0)
+                                            relocation = edit_payments.get("Monthly Relocation", 0)
+                                            
+                                            # Only add EMBO if both conditions are met (regardless of calculated amount)
+                                            if geographic_coefficient > 0 and relocation > 0:
+                                                edit_deductions[new_deduction_name.strip()] = calculated_amount
+                                        else:
+                                            edit_deductions[new_deduction_name.strip()] = calculated_amount
+                            
+                            st.markdown("### ➖ Additional Deduction")
+                            
+                            # Calculate Monthly ER Pension Contribution (editable percentage of basic_salary + stip_bonus)
+                            if edit_monthly_basic_salary > 0:
+                                edit_stip_bonus = edit_payments.get("STIP Bonus", 0)
+                                edit_er_pension_base = edit_monthly_basic_salary + edit_stip_bonus
+                                
+                                col_er_name, col_er_percentage, col_er_amount = st.columns([3, 1.5, 2])
+                                with col_er_name:
+                                    st.markdown("**Monthly ER Pension Contribution**")
+                                with col_er_percentage:
+                                    edit_er_pension_percentage = st.number_input("Percentage (%)", value=6.5, min_value=0.0, max_value=100.0, step=0.5, key=f"edit_er_pension_percentage_{emp['id']}")
+                                with col_er_amount:
+                                    edit_er_pension_amount = edit_er_pension_base * edit_er_pension_percentage / 100
+                                    st.markdown(f"**{edit_currency_symbol}{edit_er_pension_amount:,.2f}**")
+                                    st.caption(f"= {edit_er_pension_percentage}% of (Basic + STIP Bonus)")
+                                
+                                # Add to edit_deductions
+                                edit_deductions["Monthly ER Pension Contribution"] = edit_er_pension_amount
+                                
+                            else:
+                                st.warning("⚠️ Please enter Monthly Basic Salary to calculate ER Pension Contribution.")
+                                # Show in table format similar to deduction categories when basic salary is not available
+                                col_er_name, col_er_percentage, col_er_amount = st.columns([3, 1.5, 2])
+                                with col_er_name:
+                                    st.markdown("**Monthly ER Pension Contribution**")
+                                with col_er_percentage:
+                                    edit_er_pension_percentage = st.number_input("Percentage (%)", value=6.5, min_value=0.0, max_value=100.0, step=0.5, key=f"edit_er_pension_percentage_empty_{emp['id']}")
+                                with col_er_amount:
+                                    st.markdown(f"**{edit_currency_symbol}0.00**")
+                                    st.caption(f"= {edit_er_pension_percentage}% of (Basic + STIP Bonus)")
+                                
                             
                             st.markdown("### 💰 Additional Daily Payments")
                             
@@ -817,15 +1480,15 @@ with tab1:
                             
                             if emp.get('additional_daily_payments') and isinstance(emp['additional_daily_payments'], dict):
                                 for payment_name, payment_value in emp['additional_daily_payments'].items():
-                                    col_name, col_value, col_delete = st.columns([2, 1, 0.8])
+                                    col_name, col_value = st.columns([2, 1])
                                     with col_name:
-                                        new_payment_name = st.text_input(f"Category", value=payment_name, key=f"edit_additional_name_{emp['id']}_{additional_index}")
+                                        # Display category name as read-only text
+                                        st.markdown(f"**{payment_name}**")
+                                        new_payment_name = payment_name  # Use the existing name, don't allow editing
                                     with col_value:
                                         new_payment_value = st.number_input(f"Daily Rate ({edit_currency_symbol})", value=float(payment_value), min_value=0.0, step=1.0, key=f"edit_additional_value_{emp['id']}_{additional_index}")
-                                    with col_delete:
-                                        delete_additional = st.checkbox("❌", key=f"delete_additional_{emp['id']}_{additional_index}", help="Check to delete this daily payment")
                                     
-                                    if new_payment_name.strip() and not delete_additional:
+                                    if new_payment_name.strip():
                                         edit_additional_payments[new_payment_name.strip()] = new_payment_value
                                     additional_index += 1
                             
@@ -833,17 +1496,15 @@ with tab1:
                             if st.session_state[f"edit_new_daily_payments_{emp['id']}"]:
                                 st.markdown("**New Additional Daily Payment Categories:**")
                                 for i, new_payment in enumerate(st.session_state[f"edit_new_daily_payments_{emp['id']}"]):
-                                    col_name, col_value, col_remove = st.columns([2, 1, 0.8])
+                                    col_name, col_value = st.columns([2, 1])
                                     with col_name:
                                         new_payment_name = st.text_input(f"New Category", key=f"new_additional_name_{emp['id']}_{i}", 
                                                                        value=new_payment["name"], placeholder="e.g., Field Bonus")
                                     with col_value:
                                         new_payment_value = st.number_input(f"Daily Rate ({edit_currency_symbol})", key=f"new_additional_value_{emp['id']}_{i}", 
                                                                           value=float(new_payment["value"]), min_value=0.0, step=1.0)
-                                    with col_remove:
-                                        remove_new_payment = st.checkbox("❌", key=f"remove_new_additional_{emp['id']}_{i}", help="Check to remove this new daily payment")
                                     
-                                    if new_payment_name.strip() and not remove_new_payment:
+                                    if new_payment_name.strip():
                                         edit_additional_payments[new_payment_name.strip()] = new_payment_value
                         
                         col_save, col_cancel = st.columns(2)
@@ -883,7 +1544,7 @@ with tab1:
                             
                             success, message = update_employee(
                                 emp['id'], edit_emp_id, edit_emp_name, edit_employment_type, 
-                                edit_currency, edit_payments, edit_deductions, edit_additional_payments
+                                edit_currency, edit_monthly_basic_salary, edit_payments, edit_deductions, edit_additional_payments
                             )
                             
                             if success:
