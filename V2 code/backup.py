@@ -2,6 +2,17 @@ import pandas as pd
 import streamlit as st
 import sqlite3
 import json
+import io
+import datetime as dt
+from typing import Dict, List, Tuple
+import numpy as np
+from zipfile import ZipFile, ZIP_DEFLATED
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.platypus import Table, TableStyle
+import tempfile
 
 # Database setup and management functions
 def init_database():
@@ -46,10 +57,17 @@ def init_database():
     except sqlite3.OperationalError:
         pass
     
+    # Add additional_deductions column if it doesn't exist
+    try:
+        cursor.execute('ALTER TABLE employees ADD COLUMN additional_deductions TEXT DEFAULT "{}"')
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    
     conn.commit()
     conn.close()
 
-def add_employee(employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments, deductions, additional_daily_payments=None):
+def add_employee(employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments, deductions, additional_daily_payments=None, additional_deductions=None):
     """Add a new employee to the database"""
     conn = sqlite3.connect('employees.db')
     cursor = conn.cursor()
@@ -58,11 +76,12 @@ def add_employee(employee_id, employee_name, employment_type, currency, monthly_
         payments_json = json.dumps(payments) if payments else json.dumps({})
         deductions_json = json.dumps(deductions) if deductions else json.dumps({})
         additional_payments_json = json.dumps(additional_daily_payments) if additional_daily_payments else json.dumps({})
+        additional_deductions_json = json.dumps(additional_deductions) if additional_deductions else json.dumps({})
         
         cursor.execute('''
-            INSERT INTO employees (employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments, deductions, additional_daily_payments)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments_json, deductions_json, additional_payments_json))
+            INSERT INTO employees (employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments, deductions, additional_daily_payments, additional_deductions)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments_json, deductions_json, additional_payments_json, additional_deductions_json))
         
         conn.commit()
         return True, "Employee added successfully!"
@@ -86,7 +105,7 @@ def get_employee_by_name(employee_name):
     conn.close()
     
     if result:
-        # Handle monthly_basic_salary with proper type checking
+        # Handle monthly_basic_salary with proper type checking (index 10)
         monthly_salary = result[10] if len(result) > 10 and result[10] is not None else 0.0
         if isinstance(monthly_salary, str):
             try:
@@ -114,9 +133,10 @@ def get_employee_by_name(employee_name):
             'employment_type': result[3],
             'currency': result[4] if len(result) > 4 and result[4] else 'EUR',
             'monthly_basic_salary': monthly_salary,
-            'payments': json.loads(result[5]) if len(result) > 5 and result[5] else {},
-            'deductions': json.loads(result[6]) if len(result) > 6 and result[6] else {},
-            'additional_daily_payments': json.loads(result[9]) if len(result) > 9 and result[9] else {},
+            'payments': json.loads(result[5]) if len(result) > 5 and result[5] and isinstance(result[5], str) else {},
+            'deductions': json.loads(result[6]) if len(result) > 6 and result[6] and isinstance(result[6], str) else {},
+            'additional_daily_payments': json.loads(result[9]) if len(result) > 9 and result[9] and isinstance(result[9], str) else {},
+            'additional_deductions': json.loads(result[11]) if len(result) > 11 and result[11] and isinstance(result[11], str) else {},
             'created_at': result[7] if len(result) > 7 else '',
             'updated_at': result[8] if len(result) > 8 else ''
         }
@@ -135,21 +155,26 @@ def get_all_employees():
     for result in results:
         try:
             try:
-                payments_data = json.loads(result[5]) if len(result) > 5 and result[5] else {}
-            except json.JSONDecodeError:
+                payments_data = json.loads(result[5]) if len(result) > 5 and result[5] and isinstance(result[5], str) else {}
+            except (json.JSONDecodeError, TypeError):
                 payments_data = {}
             
             try:
-                deductions_data = json.loads(result[6]) if len(result) > 6 and result[6] else {}
-            except json.JSONDecodeError:
+                deductions_data = json.loads(result[6]) if len(result) > 6 and result[6] and isinstance(result[6], str) else {}
+            except (json.JSONDecodeError, TypeError):
                 deductions_data = {}
             
             try:
-                additional_payments_data = json.loads(result[9]) if len(result) > 9 and result[9] else {}
-            except json.JSONDecodeError:
+                additional_payments_data = json.loads(result[9]) if len(result) > 9 and result[9] and isinstance(result[9], str) else {}
+            except (json.JSONDecodeError, TypeError):
                 additional_payments_data = {}
             
-            # Handle monthly_basic_salary with proper type checking
+            try:
+                additional_deductions_data = json.loads(result[11]) if len(result) > 11 and result[11] and isinstance(result[11], str) else {}
+            except (json.JSONDecodeError, TypeError):
+                additional_deductions_data = {}
+            
+            # Handle monthly_basic_salary with proper type checking (index 10)
             monthly_salary = result[10] if len(result) > 10 and result[10] is not None else 0.0
             if isinstance(monthly_salary, str):
                 try:
@@ -180,6 +205,7 @@ def get_all_employees():
                 'payments': payments_data,
                 'deductions': deductions_data,
                 'additional_daily_payments': additional_payments_data,
+                'additional_deductions': additional_deductions_data,
                 'created_at': result[7] if len(result) > 7 else '',
                 'updated_at': result[8] if len(result) > 8 else ''
             })
@@ -188,7 +214,7 @@ def get_all_employees():
     
     return employees
 
-def update_employee(emp_id, employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments, deductions, additional_daily_payments=None):
+def update_employee(emp_id, employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments, deductions, additional_daily_payments=None, additional_deductions=None):
     """Update employee data"""
     conn = sqlite3.connect('employees.db')
     cursor = conn.cursor()
@@ -197,13 +223,14 @@ def update_employee(emp_id, employee_id, employee_name, employment_type, currenc
         payments_json = json.dumps(payments) if payments else json.dumps({})
         deductions_json = json.dumps(deductions) if deductions else json.dumps({})
         additional_payments_json = json.dumps(additional_daily_payments) if additional_daily_payments else json.dumps({})
+        additional_deductions_json = json.dumps(additional_deductions) if additional_deductions else json.dumps({})
         
         cursor.execute('''
             UPDATE employees 
             SET employee_id = ?, employee_name = ?, employment_type = ?, currency = ?, 
-                monthly_basic_salary = ?, payments = ?, deductions = ?, additional_daily_payments = ?, updated_at = CURRENT_TIMESTAMP
+                monthly_basic_salary = ?, payments = ?, deductions = ?, additional_daily_payments = ?, additional_deductions = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-        ''', (employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments_json, deductions_json, additional_payments_json, emp_id))
+        ''', (employee_id, employee_name, employment_type, currency, monthly_basic_salary, payments_json, deductions_json, additional_payments_json, additional_deductions_json, emp_id))
         
         conn.commit()
         return True, "Employee updated successfully!"
@@ -243,13 +270,13 @@ def update_existing_employees_with_defaults():
             
             # Parse existing payments and deductions
             try:
-                existing_payments = json.loads(emp[5]) if len(emp) > 5 and emp[5] else {}
-            except json.JSONDecodeError:
+                existing_payments = json.loads(emp[5]) if len(emp) > 5 and emp[5] and isinstance(emp[5], str) else {}
+            except (json.JSONDecodeError, TypeError):
                 existing_payments = {}
             
             try:
-                existing_deductions = json.loads(emp[6]) if len(emp) > 6 and emp[6] else {}
-            except json.JSONDecodeError:
+                existing_deductions = json.loads(emp[6]) if len(emp) > 6 and emp[6] and isinstance(emp[6], str) else {}
+            except (json.JSONDecodeError, TypeError):
                 existing_deductions = {}
             
             # Add default payment categories if they don't exist
@@ -275,7 +302,7 @@ def update_existing_employees_with_defaults():
                 del existing_payments["Monthly Geographic Coeffient"]
             
             # Auto-calculate Monthly Geographic Coefficient based on basic salary and housing allowance
-            monthly_salary = emp[4] if len(emp) > 4 else 0  # monthly_basic_salary is at index 4
+            monthly_salary = emp[10] if len(emp) > 10 else 0  # monthly_basic_salary is at index 10
             if isinstance(monthly_salary, str):
                 try:
                     monthly_salary = float(monthly_salary)
@@ -313,9 +340,15 @@ def update_existing_employees_with_defaults():
             
             # Parse existing additional daily payments
             try:
-                existing_additional_payments = json.loads(emp[9]) if len(emp) > 9 and emp[9] else {}
-            except json.JSONDecodeError:
+                existing_additional_payments = json.loads(emp[9]) if len(emp) > 9 and emp[9] and isinstance(emp[9], str) else {}
+            except (json.JSONDecodeError, TypeError):
                 existing_additional_payments = {}
+            
+            # Parse existing additional deductions
+            try:
+                existing_additional_deductions = json.loads(emp[11]) if len(emp) > 11 and emp[11] and isinstance(emp[11], str) else {}
+            except (json.JSONDecodeError, TypeError):
+                existing_additional_deductions = {}
             
             # Add default additional daily payment categories if they don't exist
             default_additional_payments = {
@@ -330,16 +363,27 @@ def update_existing_employees_with_defaults():
                 if key not in existing_additional_payments:
                     existing_additional_payments[key] = value
             
+            # Add default additional deduction categories if they don't exist
+            default_additional_deductions = {
+                "Monthly ER Pension Contribution": 0.0
+            }
+            
+            # Merge with existing additional deductions (existing values take precedence)
+            for key, value in default_additional_deductions.items():
+                if key not in existing_additional_deductions:
+                    existing_additional_deductions[key] = value
+            
             # Update the employee record
             payments_json = json.dumps(existing_payments)
             deductions_json = json.dumps(existing_deductions)
             additional_payments_json = json.dumps(existing_additional_payments)
+            additional_deductions_json = json.dumps(existing_additional_deductions)
             
             cursor.execute('''
                 UPDATE employees 
-                SET payments = ?, deductions = ?, additional_daily_payments = ?, updated_at = CURRENT_TIMESTAMP
+                SET payments = ?, deductions = ?, additional_daily_payments = ?, additional_deductions = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
-            ''', (payments_json, deductions_json, additional_payments_json, emp_id))
+            ''', (payments_json, deductions_json, additional_payments_json, additional_deductions_json, emp_id))
         
         conn.commit()
         return True
@@ -369,16 +413,26 @@ def get_currency_symbol(currency_code):
     """Get currency symbol from currency code"""
     return CURRENCY_OPTIONS.get(currency_code, currency_code)
 
-def parse_gec_timesheet(file_path_or_buffer) -> pd.DataFrame:
+def parse_gec_timesheet(file_path_or_buffer, employee_additional_payments=None) -> pd.DataFrame:
     """Parse the GEC timesheet Excel format and return a normalized DataFrame"""
     raw_df = pd.read_excel(file_path_or_buffer)
     
     # Extract employee information
     employee_name = None
+    pay_period = None
+    
     for i, row in raw_df.iterrows():
         if pd.notna(row.iloc[0]) and 'Employee Name' in str(row.iloc[0]):
             if len(row) > 3 and pd.notna(row.iloc[3]):
                 employee_name = str(row.iloc[3]).strip()
+        
+        # Look for pay period
+        if pd.notna(row.iloc[0]) and 'Pay Period' in str(row.iloc[0]):
+            if len(row) > 2 and pd.notna(row.iloc[2]):
+                try:
+                    pay_period = pd.to_datetime(row.iloc[2])
+                except:
+                    pass
     
     # Find the data start (look for date headers)
     data_start_row = None
@@ -448,7 +502,8 @@ def parse_gec_timesheet(file_path_or_buffer) -> pd.DataFrame:
                                 'description': description,
                                 'units': hours,
                                 'rate': 0.0,
-                                'amount': 0.0
+                                'amount': 0.0,
+                                'pay_period': pay_period
                             })
                     except (ValueError, TypeError):
                         pass
@@ -459,25 +514,327 @@ def parse_gec_timesheet(file_path_or_buffer) -> pd.DataFrame:
     # Create DataFrame
     df = pd.DataFrame(processed_data)
     
-    # Default rate mapping
-    rate_mapping = {
-        'days off': 350.0,
-        'rig days': 400.0,
-        'standby days': 200.0,
-        'travel days': 350.0,
-        'bonus': 150.0,
-        'premium': 180.0,
-    }
+    # Use employee's additional_daily_payments as rate mapping if provided
+    if employee_additional_payments and isinstance(employee_additional_payments, dict):
+        rate_mapping = {}
+        
+        # Map additional_daily_payments to timesheet descriptions
+        for payment_name, rate in employee_additional_payments.items():
+            if rate > 0:  # Only include payments with positive rates
+                # Create mappings based on payment names
+                if "Field Bonus" in payment_name or "Job Bonus" in payment_name:
+                    rate_mapping.update({
+                        'bonus in country': rate,
+                        'bonus': rate
+                    })
+                elif "Rotation Premium" in payment_name:
+                    rate_mapping.update({
+                        'premium in country': rate,
+                        'premium': rate,
+                        'rotation premium': rate
+                    })
+                elif "Standby Rate" in payment_name:
+                    rate_mapping.update({
+                        'standby days': rate,
+                        'standby': rate,
+                        'standby rate': rate
+                    })
+                elif "Wellsite Rate" in payment_name:
+                    rate_mapping.update({
+                        'rig days': rate,
+                        'wellsite': rate,
+                        'wellsite rate': rate
+                    })
+    else:
+        # Default rate mapping if no employee payments provided
+        rate_mapping = {
+            'days off': 350.0,
+            'rig days': 400.0,
+            'standby days': 200.0,
+            'travel days': 350.0,
+            'bonus': 150.0,
+            'premium': 180.0,
+        }
     
-    # Apply rates
+    # Apply rates with improved matching
     for desc, rate in rate_mapping.items():
-        mask = df['description'].str.lower().str.contains(desc.lower(), na=False, regex=False)
+        desc_lower = desc.lower()
+        mask = df['description'].str.lower().str.contains(desc_lower, na=False, regex=False)
         df.loc[mask, 'rate'] = rate
+    
+    # Special handling for bonus and premium variations
+    # Handle "Bonus In Country" variations
+    bonus_mask = df['description'].str.lower().str.contains('bonus.*country|bonus.*in.*country', na=False, regex=True)
+    if 'bonus in country' in rate_mapping:
+        df.loc[bonus_mask, 'rate'] = rate_mapping['bonus in country']
+    elif 'bonus' in rate_mapping:
+        df.loc[bonus_mask, 'rate'] = rate_mapping['bonus']
+    
+    # Handle "Premium In-country" variations  
+    premium_mask = df['description'].str.lower().str.contains('premium.*country|premium.*in.*country', na=False, regex=True)
+    if 'premium in country' in rate_mapping:
+        df.loc[premium_mask, 'rate'] = rate_mapping['premium in country']
+    elif 'premium' in rate_mapping:
+        df.loc[premium_mask, 'rate'] = rate_mapping['premium']
     
     # Calculate amounts
     df['amount'] = df['units'] * df['rate']
     
     return df.sort_values('date', ascending=True).reset_index(drop=True)
+
+def analyze_multiple_location_issue(df: pd.DataFrame) -> Dict:
+    """Analyze the GEC timesheet for multiple location/rate type calculations on same day"""
+    analysis_results = {
+        'has_multiple_entries': False,
+        'problem_dates': [],
+        'corrected_data': None,
+        'original_total': 0.0,
+        'corrected_total': 0.0,
+        'summary': ""
+    }
+    
+    if df.empty or 'date' not in df.columns:
+        return analysis_results
+    
+    # Find dates with multiple entries for same employee
+    if 'employee_name' in df.columns:
+        daily_counts = df.groupby(['date', 'employee_name']).size()
+        multiple_entry_dates = daily_counts[daily_counts > 1]
+        
+        if not multiple_entry_dates.empty:
+            analysis_results['has_multiple_entries'] = True
+            
+            # Analyze each problem date
+            for (date, employee), count in multiple_entry_dates.items():
+                day_entries = df[(df['date'] == date) & (df['employee_name'] == employee)]
+                
+                original_total = day_entries['amount'].sum()
+                entries_detail = []
+                for _, row in day_entries.iterrows():
+                    entries_detail.append({
+                        'description': row.get('description', ''),
+                        'units': row.get('units', 0),
+                        'rate': row.get('rate', 0),
+                        'amount': row.get('amount', 0)
+                    })
+                
+                analysis_results['problem_dates'].append({
+                    'date': date,
+                    'employee': employee,
+                    'entry_count': count,
+                    'entries': entries_detail,
+                    'total_amount': original_total,
+                    'total_units': day_entries['units'].sum() if 'units' in day_entries.columns else 0
+                })
+            
+            # Create corrected data - group by date and employee, sum amounts
+            corrected_daily = df.groupby(['date', 'employee_name']).agg({
+                'location': lambda x: ' + '.join(x.unique()) if len(x.unique()) > 1 else x.iloc[0],
+                'units': 'sum',
+                'amount': 'sum',
+                'description': lambda x: ' + '.join(x) if len(x) > 1 else x.iloc[0]
+            }).reset_index()
+            
+            # Calculate effective rate for multiple entries
+            corrected_daily['rate'] = corrected_daily.apply(
+                lambda row: round(row['amount'] / row['units'], 2) if row['units'] > 0 else 0, 
+                axis=1
+            )
+            
+            analysis_results['corrected_data'] = corrected_daily
+            analysis_results['original_total'] = df['amount'].sum()
+            analysis_results['corrected_total'] = corrected_daily['amount'].sum()
+            
+            problem_count = len(analysis_results['problem_dates'])
+            analysis_results['summary'] = f"Found {problem_count} dates with multiple entries that need correction."
+    
+    return analysis_results
+
+def generate_payslip_pdf(employee_data, timesheet_df, pay_period_end):
+    """Generate payslip PDF for an employee"""
+    buffer = io.BytesIO()
+    
+    # Create PDF
+    p = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    
+    # Company header
+    p.setFont("Helvetica-Bold", 16)
+    p.drawString(50, height - 50, "GEC COMPANY")
+    p.setFont("Helvetica", 12)
+    p.drawString(50, height - 70, "Employee Payslip")
+    
+    # Employee information
+    y_pos = height - 110
+    p.setFont("Helvetica-Bold", 12)
+    p.drawString(50, y_pos, f"Employee: {employee_data['employee_name']}")
+    y_pos -= 20
+    p.drawString(50, y_pos, f"Employee ID: {employee_data['employee_id']}")
+    y_pos -= 20
+    p.drawString(50, y_pos, f"Pay Period: {pay_period_end.strftime('%B %Y')}")
+    
+    currency_symbol = get_currency_symbol(employee_data.get('currency', 'EUR'))
+    
+    # Timesheet summary
+    y_pos -= 40
+    p.setFont("Helvetica-Bold", 14)
+    p.drawString(50, y_pos, "Timesheet Summary")
+    y_pos -= 20
+    
+    # Group timesheet data by description
+    if not timesheet_df.empty:
+        timesheet_summary = timesheet_df.groupby('description').agg({
+            'units': 'sum',
+            'rate': 'first',
+            'amount': 'sum'
+        }).reset_index()
+        
+        # Timesheet table headers
+        p.setFont("Helvetica-Bold", 10)
+        p.drawString(50, y_pos, "Description")
+        p.drawString(250, y_pos, "Units")
+        p.drawString(300, y_pos, "Rate")
+        p.drawString(380, y_pos, "Amount")
+        y_pos -= 15
+        
+        # Timesheet data
+        p.setFont("Helvetica", 10)
+        timesheet_total = 0
+        for _, row in timesheet_summary.iterrows():
+            p.drawString(50, y_pos, str(row['description'])[:30])
+            p.drawString(250, y_pos, f"{row['units']:.1f}")
+            p.drawString(300, y_pos, f"{currency_symbol}{row['rate']:.2f}")
+            p.drawString(380, y_pos, f"{currency_symbol}{row['amount']:.2f}")
+            timesheet_total += row['amount']
+            y_pos -= 15
+        
+        # Timesheet total
+        p.setFont("Helvetica-Bold", 10)
+        p.drawString(250, y_pos, "Total:")
+        p.drawString(380, y_pos, f"{currency_symbol}{timesheet_total:.2f}")
+        y_pos -= 30
+    
+    # Monthly payments
+    p.setFont("Helvetica-Bold", 14)
+    p.drawString(50, y_pos, "Monthly Payments")
+    y_pos -= 20
+    
+    monthly_total = 0
+    if employee_data['payments'] and isinstance(employee_data['payments'], dict):
+        p.setFont("Helvetica", 10)
+        for payment_name, amount in employee_data['payments'].items():
+            if amount > 0:
+                p.drawString(50, y_pos, payment_name)
+                p.drawString(380, y_pos, f"{currency_symbol}{amount:.2f}")
+                monthly_total += amount
+                y_pos -= 15
+    
+    # Monthly basic salary
+    monthly_salary = employee_data.get('monthly_basic_salary', 0)
+    if monthly_salary > 0:
+        p.drawString(50, y_pos, "Monthly Basic Salary")
+        p.drawString(380, y_pos, f"{currency_symbol}{monthly_salary:.2f}")
+        monthly_total += monthly_salary
+        y_pos -= 15
+    
+    # Monthly total
+    p.setFont("Helvetica-Bold", 10)
+    p.drawString(250, y_pos, "Monthly Total:")
+    p.drawString(380, y_pos, f"{currency_symbol}{monthly_total:.2f}")
+    y_pos -= 30
+    
+    # Deductions
+    p.setFont("Helvetica-Bold", 14)
+    p.drawString(50, y_pos, "Deductions")
+    y_pos -= 20
+    
+    deductions_total = 0
+    if employee_data['deductions'] and isinstance(employee_data['deductions'], dict):
+        p.setFont("Helvetica", 10)
+        for deduction_name, amount in employee_data['deductions'].items():
+            if amount > 0:
+                p.drawString(50, y_pos, deduction_name)
+                p.drawString(380, y_pos, f"-{currency_symbol}{amount:.2f}")
+                deductions_total += amount
+                y_pos -= 15
+    
+    # Deductions total
+    p.setFont("Helvetica-Bold", 10)
+    p.drawString(250, y_pos, "Total Deductions:")
+    p.drawString(380, y_pos, f"-{currency_symbol}{deductions_total:.2f}")
+    y_pos -= 30
+    
+    # Net pay calculation
+    gross_pay = timesheet_total + monthly_total
+    net_pay = gross_pay - deductions_total
+    
+    # Final totals
+    p.setFont("Helvetica-Bold", 12)
+    p.drawString(50, y_pos, f"Gross Pay: {currency_symbol}{gross_pay:.2f}")
+    y_pos -= 20
+    p.drawString(50, y_pos, f"Total Deductions: -{currency_symbol}{deductions_total:.2f}")
+    y_pos -= 20
+    p.setFont("Helvetica-Bold", 14)
+    p.drawString(50, y_pos, f"NET PAY: {currency_symbol}{net_pay:.2f}")
+    
+    p.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+def create_corrected_excel(df: pd.DataFrame, analysis: Dict, pay_period_end: dt.date) -> bytes:
+    """Create an Excel file showing timesheet analysis"""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # Original data
+        df_clean = df.copy()
+        # Ensure all columns are properly formatted for Excel
+        for col in df_clean.columns:
+            if df_clean[col].dtype == 'object':
+                df_clean[col] = df_clean[col].astype(str)
+        
+        df_clean.to_excel(writer, sheet_name="Original Data", index=False)
+        
+        # Problem analysis
+        if analysis['has_multiple_entries']:
+            problem_data = []
+            for problem in analysis['problem_dates']:
+                for entry in problem['entries']:
+                    problem_data.append({
+                        'Date': problem['date'],
+                        'Employee': problem['employee'],
+                        'Description': entry['description'],
+                        'Units': entry['units'],
+                        'Rate': entry['rate'],
+                        'Amount': entry['amount']
+                    })
+            
+            if problem_data:
+                problem_df = pd.DataFrame(problem_data)
+                problem_df.to_excel(writer, sheet_name="Problem Analysis", index=False)
+            
+            # Corrected data
+            if analysis['corrected_data'] is not None:
+                analysis['corrected_data'].to_excel(writer, sheet_name="Corrected Daily Summary", index=False)
+        
+        # Instructions sheet
+        instructions = pd.DataFrame({
+            'Step': [
+                '1. Issue Identification',
+                '2. Problem Analysis', 
+                '3. Corrected Calculation',
+                '4. Implementation'
+            ],
+            'Description': [
+                'When employee works multiple roles in same day, amounts need to be summed',
+                'Check "Problem Analysis" sheet for dates with multiple entries',
+                'Check "Corrected Daily Summary" sheet for proper daily totals',
+                'Use SUMIFS formula: =SUMIFS(Amount, Date, Target_Date, Employee, Target_Employee)'
+            ]
+        })
+        instructions.to_excel(writer, sheet_name="Instructions", index=False)
+    
+    output.seek(0)
+    return output.getvalue()
 
 # Set page config at the very beginning
 st.set_page_config(page_title="GEC Timesheet Analyzer & Payslip Generator", page_icon="💼", layout="wide")
@@ -714,9 +1071,10 @@ with tab1:
                             # Update session state with percentage
                             st.session_state.deduction_items[i]["percentage"] = deduction_percentage
                     
-                    st.markdown("### ➖ Additional Deduction")
+                    st.markdown("### ➖ Additional Deductions")
                     
                     # Calculate Monthly ER Pension Contribution (editable percentage of basic_salary + stip_bonus)
+                    additional_deductions = {}
                     if basic_salary > 0:
                         stip_bonus = payment_dict.get("STIP Bonus", 0)
                         er_pension_base = basic_salary + stip_bonus
@@ -731,8 +1089,8 @@ with tab1:
                             st.markdown(f"**{currency_symbol}{er_pension_amount:,.2f}**")
                             st.caption(f"= {er_pension_percentage}% of (Basic + STIP Bonus)")
                         
-                        # Add to deduction_dict
-                        deduction_dict["Monthly ER Pension Contribution"] = er_pension_amount
+                        # Add to additional_deductions dict
+                        additional_deductions["Monthly ER Pension Contribution"] = er_pension_amount
                         
                     else:
                         st.warning("⚠️ Please enter Monthly Basic Salary to calculate ER Pension Contribution.")
@@ -792,26 +1150,10 @@ with tab1:
                                                              if not st.session_state.get(f"remove_daily_payment_{i}", False)]
                     
                     if new_emp_id and new_emp_name and employment_type and currency and monthly_basic_salary > 0:
-                        success, message = add_employee(new_emp_id, new_emp_name, employment_type, currency, monthly_basic_salary, payment_dict, deduction_dict)
+                        success, message = add_employee(new_emp_id, new_emp_name, employment_type, currency, monthly_basic_salary, payment_dict, deduction_dict, additional_payments, additional_deductions)
                         
                         if success:
-                            if any(value > 0 for value in additional_payments.values()):
-                                try:
-                                    conn = sqlite3.connect('employees.db')
-                                    cursor = conn.cursor()
-                                    additional_payments_json = json.dumps(additional_payments)
-                                    cursor.execute('''
-                                        UPDATE employees 
-                                        SET additional_daily_payments = ? 
-                                        WHERE employee_id = ?
-                                    ''', (additional_payments_json, new_emp_id))
-                                    conn.commit()
-                                    conn.close()
-                                    st.success(f"{message} Additional daily payments also saved!")
-                                except Exception as e:
-                                    st.warning(f"Employee created but failed to save additional payments: {str(e)}")
-                            else:
-                                st.success(message)
+                            st.success(message)
                             
                             # Reset to default categories after successful save
                             st.session_state.payment_items = [
@@ -1009,13 +1351,11 @@ with tab1:
                             
                             deduction_data = []
                             for deduction_name, deduction_value in cleaned_deductions.items():
-                                # Exclude ER Pension Contribution from regular deductions display
-                                if deduction_name != "Monthly ER Pension Contribution":
-                                    deduction_data.append({
-                                        'Category': deduction_name,
-                                        'Amount': f"{currency_symbol}{deduction_value:,.2f}"
-                                    })
-                                    total_deductions += deduction_value
+                                deduction_data.append({
+                                    'Category': deduction_name,
+                                    'Amount': f"{currency_symbol}{deduction_value:,.2f}"
+                                })
+                                total_deductions += deduction_value
                             
                             if deduction_data:
                                 deduction_df = pd.DataFrame(deduction_data)
@@ -1027,39 +1367,21 @@ with tab1:
                                 st.markdown(f"• {deduction}")
                             st.markdown("*Note: Old format - no amounts stored*")
                     
-                    # Additional Deduction - Monthly ER Pension Contribution (auto-calculated)
-                    st.markdown("**Additional Deduction:**")
-                    monthly_salary = emp.get('monthly_basic_salary', 0)
-                    if isinstance(monthly_salary, str):
-                        try:
-                            monthly_salary = float(monthly_salary)
-                        except ValueError:
-                            monthly_salary = 0.0
-                    
-                    stip_bonus = 0.0
-                    if emp['payments'] and isinstance(emp['payments'], dict):
-                        stip_bonus = emp['payments'].get("STIP Bonus", 0.0)
-                    
-                    if monthly_salary > 0:
-                        er_pension_base = monthly_salary + stip_bonus
-                        er_pension_amount = er_pension_base * 6.5 / 100
+                    # Additional Deductions
+                    if emp.get('additional_deductions') and isinstance(emp['additional_deductions'], dict):
+                        st.markdown("**Additional Deductions:**")
+                        additional_deduction_data = []
+                        for deduction_name, deduction_value in emp['additional_deductions'].items():
+                            additional_deduction_data.append({
+                                'Category': deduction_name,
+                                'Amount': f"{currency_symbol}{deduction_value:,.2f}"
+                            })
                         
-                        additional_deduction_data = [{
-                            'Category': 'Monthly ER Pension Contribution',
-                            'Amount': f"{currency_symbol}{er_pension_amount:,.2f}"
-                        }]
-                        
-                        additional_deduction_df = pd.DataFrame(additional_deduction_data)
-                        st.dataframe(additional_deduction_df, use_container_width=True, hide_index=True)
-                    else:
-                        # Show empty table format similar to deduction categories
-                        empty_additional_deduction_data = [{
-                            'Category': 'Monthly ER Pension Contribution',
-                            'Amount': f"{currency_symbol}0.00"
-                        }]
-                        
-                        empty_additional_deduction_df = pd.DataFrame(empty_additional_deduction_data)
-                        st.dataframe(empty_additional_deduction_df, use_container_width=True, hide_index=True)
+                        if additional_deduction_data:
+                            additional_deduction_df = pd.DataFrame(additional_deduction_data)
+                            st.dataframe(additional_deduction_df, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No additional deductions configured.")
                     
                     if emp.get('additional_daily_payments'):
                         st.markdown("**Additional Daily Payments:**")
@@ -1264,10 +1586,6 @@ with tab1:
                             # Handle both old list format and new dict format
                             if isinstance(emp['deductions'], dict):
                                 for deduction_name, deduction_value in cleaned_deductions.items():
-                                    # Skip ER Pension Contribution as it's handled in Additional Deduction section
-                                    if deduction_name == "Monthly ER Pension Contribution":
-                                        continue
-                                        
                                     col_name, col_percentage, col_amount = st.columns([2, 1, 1.5])
                                     with col_name:
                                         # Display category name as read-only text
@@ -1439,37 +1757,58 @@ with tab1:
                                         else:
                                             edit_deductions[new_deduction_name.strip()] = calculated_amount
                             
-                            st.markdown("### ➖ Additional Deduction")
+                            st.markdown("### ➖ Additional Deductions")
+                            
+                            # Handle existing additional deductions
+                            edit_additional_deductions = {}
                             
                             # Calculate Monthly ER Pension Contribution (editable percentage of basic_salary + stip_bonus)
-                            if edit_monthly_basic_salary > 0:
-                                edit_stip_bonus = edit_payments.get("STIP Bonus", 0)
-                                edit_er_pension_base = edit_monthly_basic_salary + edit_stip_bonus
+                            if edit_basic_salary > 0:
+                                stip_bonus = edit_payments.get("STIP Bonus", 0)
+                                er_pension_base = edit_basic_salary + stip_bonus
                                 
                                 col_er_name, col_er_percentage, col_er_amount = st.columns([3, 1.5, 2])
                                 with col_er_name:
                                     st.markdown("**Monthly ER Pension Contribution**")
                                 with col_er_percentage:
-                                    edit_er_pension_percentage = st.number_input("Percentage (%)", value=6.5, min_value=0.0, max_value=100.0, step=0.5, key=f"edit_er_pension_percentage_{emp['id']}")
+                                    # Get existing percentage if available
+                                    existing_er_pension = emp.get('additional_deductions', {}).get('Monthly ER Pension Contribution', 0)
+                                    existing_er_percentage = (existing_er_pension / er_pension_base * 100) if er_pension_base > 0 and existing_er_pension > 0 else 6.5
+                                    
+                                    er_pension_percentage = st.number_input("Percentage (%)", value=existing_er_percentage, min_value=0.0, max_value=100.0, step=0.5, key=f"edit_er_pension_percentage_{emp['id']}")
                                 with col_er_amount:
-                                    edit_er_pension_amount = edit_er_pension_base * edit_er_pension_percentage / 100
-                                    st.markdown(f"**{edit_currency_symbol}{edit_er_pension_amount:,.2f}**")
-                                    st.caption(f"= {edit_er_pension_percentage}% of (Basic + STIP Bonus)")
+                                    er_pension_amount = er_pension_base * er_pension_percentage / 100
+                                    st.markdown(f"**{edit_currency_symbol}{er_pension_amount:,.2f}**")
+                                    st.caption(f"= {er_pension_percentage}% of (Basic + STIP Bonus)")
                                 
-                                # Add to edit_deductions
-                                edit_deductions["Monthly ER Pension Contribution"] = edit_er_pension_amount
-                                
+                                # Add to additional_deductions dict
+                                edit_additional_deductions["Monthly ER Pension Contribution"] = er_pension_amount
                             else:
                                 st.warning("⚠️ Please enter Monthly Basic Salary to calculate ER Pension Contribution.")
+                                
                                 # Show in table format similar to deduction categories when basic salary is not available
                                 col_er_name, col_er_percentage, col_er_amount = st.columns([3, 1.5, 2])
                                 with col_er_name:
                                     st.markdown("**Monthly ER Pension Contribution**")
                                 with col_er_percentage:
-                                    edit_er_pension_percentage = st.number_input("Percentage (%)", value=6.5, min_value=0.0, max_value=100.0, step=0.5, key=f"edit_er_pension_percentage_empty_{emp['id']}")
+                                    er_pension_percentage = st.number_input("Percentage (%)", value=6.5, min_value=0.0, max_value=100.0, step=0.5, key=f"edit_er_pension_percentage_empty_{emp['id']}")
                                 with col_er_amount:
                                     st.markdown(f"**{edit_currency_symbol}0.00**")
-                                    st.caption(f"= {edit_er_pension_percentage}% of (Basic + STIP Bonus)")
+                                    st.caption(f"= {er_pension_percentage}% of (Basic + STIP Bonus)")
+                                
+                                edit_additional_deductions["Monthly ER Pension Contribution"] = 0.0
+                            
+                            # Handle other existing additional deductions
+                            if emp.get('additional_deductions') and isinstance(emp['additional_deductions'], dict):
+                                for deduction_name, deduction_value in emp['additional_deductions'].items():
+                                    if deduction_name != "Monthly ER Pension Contribution":  # Skip ER Pension as it's handled above
+                                        col_name, col_value = st.columns([2, 1])
+                                        with col_name:
+                                            st.markdown(f"**{deduction_name}**")
+                                        with col_value:
+                                            new_deduction_value = st.number_input(f"Amount ({edit_currency_symbol})", value=float(deduction_value), min_value=0.0, step=1.0, key=f"edit_additional_deduction_{emp['id']}_{deduction_name}")
+                                        
+                                        edit_additional_deductions[deduction_name] = new_deduction_value
                                 
                             
                             st.markdown("### 💰 Additional Daily Payments")
@@ -1544,7 +1883,7 @@ with tab1:
                             
                             success, message = update_employee(
                                 emp['id'], edit_emp_id, edit_emp_name, edit_employment_type, 
-                                edit_currency, edit_monthly_basic_salary, edit_payments, edit_deductions, edit_additional_payments
+                                edit_currency, edit_monthly_basic_salary, edit_payments, edit_deductions, edit_additional_payments, edit_additional_deductions
                             )
                             
                             if success:
@@ -1599,44 +1938,165 @@ with tab2:
         st.success(f"✅ File uploaded: {uploaded.name}")
         
         try:
+            # Parse timesheet without employee-specific rates first
             df = parse_gec_timesheet(uploaded)
             st.success("📊 Timesheet parsed successfully!")
             
             timesheet_employees = df['employee_name'].unique() if 'employee_name' in df.columns else []
             
             if len(timesheet_employees) > 0:
-                st.subheader("🔍 Employee Database Matching")
+                st.subheader("🔍 Employee Database Matching & Payslip Generation")
                 
                 matched_employees = []
                 unmatched_employees = []
+                payslip_data = {}
                 
+                # Process each employee from timesheet
                 for ts_emp in timesheet_employees:
                     db_employee = get_employee_by_name(ts_emp)
                     if db_employee:
                         matched_employees.append((ts_emp, db_employee))
+                        
+                        # Re-parse timesheet with employee-specific rates
+                        employee_additional_payments = db_employee.get('additional_daily_payments', {})
+                        employee_df = parse_gec_timesheet(uploaded, employee_additional_payments)
+                        employee_timesheet = employee_df[employee_df['employee_name'] == ts_emp]
+                        
+                        # Analyze for multiple entries per day
+                        analysis = analyze_multiple_location_issue(employee_timesheet)
+                        
+                        payslip_data[ts_emp] = {
+                            'employee': db_employee,
+                            'timesheet': employee_timesheet,
+                            'analysis': analysis
+                        }
                     else:
                         unmatched_employees.append(ts_emp)
                 
+                # Display results
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    st.markdown("### ✅ Matched Employees")
+                    st.markdown("### ✅ Matched Employees & Payslips")
                     if matched_employees:
                         for ts_name, db_emp in matched_employees:
                             employee_currency = get_currency_symbol(db_emp.get('currency', 'EUR'))
-                            with st.expander(f"👤 {ts_name} ({db_emp['employee_id']}) - {employee_currency}", expanded=False):
+                            
+                            with st.expander(f"👤 {ts_name} ({db_emp['employee_id']}) - {employee_currency}", expanded=True):
                                 st.markdown(f"**Employment Type:** {db_emp['employment_type']}")
                                 st.markdown(f"**Currency:** {db_emp.get('currency', 'EUR')} ({employee_currency})")
                                 
-                                if db_emp['payments'] and isinstance(db_emp['payments'], dict):
-                                    st.markdown("**Payment Categories:**")
-                                    for payment_name, payment_value in db_emp['payments'].items():
-                                        st.markdown(f"• **{payment_name}**: {employee_currency}{payment_value:.2f}")
+                                # Show timesheet summary
+                                emp_data = payslip_data[ts_name]
+                                timesheet_df = emp_data['timesheet']
+                                analysis = emp_data['analysis']
                                 
-                                if db_emp['deductions'] and isinstance(db_emp['deductions'], dict):
-                                    st.markdown("**Deduction Categories:**")
-                                    for deduction_name, deduction_value in db_emp['deductions'].items():
-                                        st.markdown(f"• **{deduction_name}**: {employee_currency}{deduction_value:.2f}")
+                                if not timesheet_df.empty:
+                                    # Show timesheet summary
+                                    st.markdown("**📊 Timesheet Summary:**")
+                                    timesheet_summary = timesheet_df.groupby('description').agg({
+                                        'units': 'sum',
+                                        'rate': 'first',
+                                        'amount': 'sum'
+                                    }).reset_index()
+                                    
+                                    total_timesheet_amount = 0
+                                    for _, row in timesheet_summary.iterrows():
+                                        st.markdown(f"• **{row['description']}**: {row['units']:.1f} units × {employee_currency}{row['rate']:.2f} = {employee_currency}{row['amount']:.2f}")
+                                        total_timesheet_amount += row['amount']
+                                    
+                                    st.markdown(f"**📊 Total Timesheet Amount: {employee_currency}{total_timesheet_amount:.2f}**")
+                                    
+                                    # Show analysis if multiple entries found
+                                    if analysis['has_multiple_entries']:
+                                        st.warning(f"⚠️ {analysis['summary']}")
+                                        
+                                        with st.expander("🔍 View Problem Details", expanded=False):
+                                            for problem in analysis['problem_dates']:
+                                                st.markdown(f"**Date: {problem['date'].strftime('%Y-%m-%d')}**")
+                                                for entry in problem['entries']:
+                                                    st.markdown(f"  • {entry['description']}: {entry['units']} × {employee_currency}{entry['rate']:.2f} = {employee_currency}{entry['amount']:.2f}")
+                                                st.markdown(f"  **Daily Total: {employee_currency}{problem['total_amount']:.2f}**")
+                                    
+                                    # Show monthly payments
+                                    if db_emp['payments'] and isinstance(db_emp['payments'], dict):
+                                        st.markdown("**💰 Monthly Payments:**")
+                                        monthly_total = 0
+                                        monthly_salary = db_emp.get('monthly_basic_salary', 0)
+                                        if monthly_salary > 0:
+                                            st.markdown(f"• **Monthly Basic Salary**: {employee_currency}{monthly_salary:.2f}")
+                                            monthly_total += monthly_salary
+                                        
+                                        for payment_name, payment_value in db_emp['payments'].items():
+                                            if payment_value > 0:
+                                                st.markdown(f"• **{payment_name}**: {employee_currency}{payment_value:.2f}")
+                                                monthly_total += payment_value
+                                        
+                                        st.markdown(f"**💰 Total Monthly: {employee_currency}{monthly_total:.2f}**")
+                                    
+                                    # Show deductions
+                                    if db_emp['deductions'] and isinstance(db_emp['deductions'], dict):
+                                        st.markdown("**➖ Deductions:**")
+                                        deductions_total = 0
+                                        for deduction_name, deduction_value in db_emp['deductions'].items():
+                                            if deduction_value > 0:
+                                                st.markdown(f"• **{deduction_name}**: -{employee_currency}{deduction_value:.2f}")
+                                                deductions_total += deduction_value
+                                        
+                                        st.markdown(f"**➖ Total Deductions: -{employee_currency}{deductions_total:.2f}**")
+                                        
+                                        # Calculate net pay
+                                        gross_pay = total_timesheet_amount + monthly_total
+                                        net_pay = gross_pay - deductions_total
+                                        
+                                        st.markdown("---")
+                                        st.markdown(f"**💼 Gross Pay: {employee_currency}{gross_pay:.2f}**")
+                                        st.markdown(f"**💰 NET PAY: {employee_currency}{net_pay:.2f}**")
+                                    
+                                    # Generate payslip button
+                                    col_pdf, col_excel = st.columns(2)
+                                    
+                                    with col_pdf:
+                                        if st.button(f"📄 Generate Payslip PDF", key=f"pdf_{db_emp['employee_id']}"):
+                                            try:
+                                                # Get pay period from timesheet data
+                                                pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
+                                                if pd.isna(pay_period):
+                                                    pay_period = dt.datetime.now()
+                                                
+                                                pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period)
+                                                
+                                                st.download_button(
+                                                    label=f"💾 Download {ts_name} Payslip.pdf",
+                                                    data=pdf_data,
+                                                    file_name=f"{ts_name}_Payslip_{pay_period.strftime('%Y_%m')}.pdf",
+                                                    mime="application/pdf",
+                                                    key=f"download_pdf_{db_emp['employee_id']}"
+                                                )
+                                            except Exception as e:
+                                                st.error(f"Error generating PDF: {str(e)}")
+                                    
+                                    with col_excel:
+                                        if st.button(f"📊 Analysis Excel", key=f"excel_{db_emp['employee_id']}"):
+                                            try:
+                                                # Get pay period from timesheet data
+                                                pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
+                                                if pd.isna(pay_period):
+                                                    pay_period = dt.datetime.now()
+                                                
+                                                excel_data = create_corrected_excel(timesheet_df, analysis, pay_period)
+                                                
+                                                st.download_button(
+                                                    label=f"💾 Download {ts_name} Analysis.xlsx",
+                                                    data=excel_data,
+                                                    file_name=f"{ts_name}_Timesheet_Analysis_{pay_period.strftime('%Y_%m')}.xlsx",
+                                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                                    key=f"download_excel_{db_emp['employee_id']}"
+                                                )
+                                            except Exception as e:
+                                                st.error(f"Error generating Excel: {str(e)}")
+                                else:
+                                    st.warning("No timesheet data found for this employee.")
                     else:
                         st.info("No employees matched yet.")
                 
@@ -1654,7 +2114,7 @@ with tab2:
                 matched_count = len(matched_employees)
                 match_percentage = (matched_count / total_employees * 100) if total_employees > 0 else 0
                 
-                st.markdown("### 📊 Matching Summary")
+                st.markdown("### 📊 Processing Summary")
                 summary_col1, summary_col2, summary_col3 = st.columns(3)
                 with summary_col1:
                     st.metric("Total Employees", total_employees)
@@ -1663,10 +2123,112 @@ with tab2:
                 with summary_col3:
                     st.metric("Match %", f"{match_percentage:.1f}%")
                 
-                st.subheader("📊 Timesheet Data Preview")
-                st.dataframe(df.head(10), use_container_width=True)
+                # Generate all payslips at once
+                if matched_employees:
+                    st.markdown("---")
+                    st.subheader("📦 Bulk Download")
+                    
+                    col_bulk_pdf, col_bulk_excel = st.columns(2)
+                    
+                    with col_bulk_pdf:
+                        if st.button("📄 Generate All Payslips (ZIP)", type="primary"):
+                            try:
+                                zip_buffer = io.BytesIO()
+                                with ZipFile(zip_buffer, 'w', ZIP_DEFLATED) as zip_file:
+                                    for ts_name, db_emp in matched_employees:
+                                        emp_data = payslip_data[ts_name]
+                                        timesheet_df = emp_data['timesheet']
+                                        
+                                        if not timesheet_df.empty:
+                                            # Get pay period
+                                            pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
+                                            if pd.isna(pay_period):
+                                                pay_period = dt.datetime.now()
+                                            
+                                            # Generate PDF
+                                            pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period)
+                                            
+                                            # Add to ZIP
+                                            zip_file.writestr(
+                                                f"{ts_name}_Payslip_{pay_period.strftime('%Y_%m')}.pdf",
+                                                pdf_data
+                                            )
+                                
+                                zip_buffer.seek(0)
+                                st.download_button(
+                                    label="💾 Download All Payslips (ZIP)",
+                                    data=zip_buffer.getvalue(),
+                                    file_name=f"GEC_Payslips_{dt.datetime.now().strftime('%Y_%m')}.zip",
+                                    mime="application/zip"
+                                )
+                            except Exception as e:
+                                st.error(f"Error generating bulk payslips: {str(e)}")
+                    
+                    with col_bulk_excel:
+                        if st.button("📊 Generate All Analysis (ZIP)", type="primary"):
+                            try:
+                                zip_buffer = io.BytesIO()
+                                with ZipFile(zip_buffer, 'w', ZIP_DEFLATED) as zip_file:
+                                    for ts_name, db_emp in matched_employees:
+                                        emp_data = payslip_data[ts_name]
+                                        timesheet_df = emp_data['timesheet']
+                                        analysis = emp_data['analysis']
+                                        
+                                        if not timesheet_df.empty:
+                                            # Get pay period
+                                            pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
+                                            if pd.isna(pay_period):
+                                                pay_period = dt.datetime.now()
+                                            
+                                            # Generate Excel
+                                            excel_data = create_corrected_excel(timesheet_df, analysis, pay_period)
+                                            
+                                            # Add to ZIP
+                                            zip_file.writestr(
+                                                f"{ts_name}_Analysis_{pay_period.strftime('%Y_%m')}.xlsx",
+                                                excel_data
+                                            )
+                                
+                                zip_buffer.seek(0)
+                                st.download_button(
+                                    label="💾 Download All Analysis (ZIP)",
+                                    data=zip_buffer.getvalue(),
+                                    file_name=f"GEC_Analysis_{dt.datetime.now().strftime('%Y_%m')}.zip",
+                                    mime="application/zip"
+                                )
+                            except Exception as e:
+                                st.error(f"Error generating bulk analysis: {str(e)}")
+                
+                # Raw timesheet data preview
+                st.subheader("📊 Raw Timesheet Data Preview")
+                st.dataframe(df, use_container_width=True)
                 
         except Exception as e:
             st.error(f"❌ Error parsing timesheet: {str(e)}")
+            st.error("Please make sure the Excel file follows the GEC timesheet format.")
     else:
         st.info("👆 Please upload an Excel file to continue")
+        
+        # Show example format
+        st.markdown("### 📋 Expected Timesheet Format")
+        st.markdown("""
+        The Excel file should contain:
+        1. **Employee Name** in a cell containing "Employee Name" 
+        2. **Pay Period** in a cell containing "Pay Period"
+        3. **Date headers** in a row (multiple consecutive dates)
+        4. **Data rows** with:
+           - Column A: Location
+           - Column C: Description ("Rig days", "Standby Days", "Bonus In Country", "Premium In-country")
+           - Columns 3+: Daily values for each date
+        """)
+        
+        st.markdown("### 💰 Rate Mapping")
+        st.markdown("""
+        Rates are automatically pulled from each employee's **Additional Daily Payments**:
+        - **Field Bonus/Job Bonus** → Used for "Bonus In Country" descriptions
+        - **Rotation Premium** → Used for "Premium In-country" descriptions  
+        - **Standby Rate** → Used for "standby days", "standby rate"
+        - **Wellsite Rate** → Used for "rig days", "wellsite rate"
+        """)
+        
+        st.info("💡 **Tip**: Make sure employees are added in the Employee Management tab with their Additional Daily Payments configured!")
