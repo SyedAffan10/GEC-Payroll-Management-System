@@ -9,10 +9,12 @@ import numpy as np
 from zipfile import ZipFile, ZIP_DEFLATED
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
-from reportlab.lib.units import mm
+from reportlab.lib.units import mm, inch
 from reportlab.lib import colors
-from reportlab.platypus import Table, TableStyle
+from reportlab.platypus import Table, TableStyle, SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 import tempfile
+import os
 
 # Database setup and management functions
 def init_database():
@@ -546,15 +548,8 @@ def parse_gec_timesheet(file_path_or_buffer, employee_additional_payments=None) 
                         'wellsite rate': rate
                     })
     else:
-        # Default rate mapping if no employee payments provided
-        rate_mapping = {
-            'days off': 350.0,
-            'rig days': 400.0,
-            'standby days': 200.0,
-            'travel days': 350.0,
-            'bonus': 150.0,
-            'premium': 180.0,
-        }
+        # No employee payments provided - use empty rate mapping
+        rate_mapping = {}
     
     # Apply rates with improved matching
     for desc, rate in rate_mapping.items():
@@ -650,38 +645,72 @@ def analyze_multiple_location_issue(df: pd.DataFrame) -> Dict:
     
     return analysis_results
 
+def format_currency(amount, currency_symbol):
+    """Format currency amount with proper symbol"""
+    try:
+        return f"{currency_symbol} {amount:,.2f}"
+    except Exception:
+        return str(amount)
+
 def generate_payslip_pdf(employee_data, timesheet_df, pay_period_end):
-    """Generate payslip PDF for an employee"""
+    """Generate professional table-based payslip PDF matching old.py format"""
     buffer = io.BytesIO()
     
-    # Create PDF
-    p = canvas.Canvas(buffer, pagesize=A4)
+    # Create PDF with canvas for header and tables
+    c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
-    
-    # Company header
-    p.setFont("Helvetica-Bold", 16)
-    p.drawString(50, height - 50, "GEC COMPANY")
-    p.setFont("Helvetica", 12)
-    p.drawString(50, height - 70, "Employee Payslip")
-    
-    # Employee information
-    y_pos = height - 110
-    p.setFont("Helvetica-Bold", 12)
-    p.drawString(50, y_pos, f"Employee: {employee_data['employee_name']}")
-    y_pos -= 20
-    p.drawString(50, y_pos, f"Employee ID: {employee_data['employee_id']}")
-    y_pos -= 20
-    p.drawString(50, y_pos, f"Pay Period: {pay_period_end.strftime('%B %Y')}")
+    margin = 18 * mm
+    y = height - margin
     
     currency_symbol = get_currency_symbol(employee_data.get('currency', 'EUR'))
     
-    # Timesheet summary
-    y_pos -= 40
-    p.setFont("Helvetica-Bold", 14)
-    p.drawString(50, y_pos, "Timesheet Summary")
-    y_pos -= 20
+    # Add logo on the right side if it exists
+    logo_path = "logo.png"
+    if os.path.exists(logo_path):
+        try:
+            from PIL import Image
+            img = Image.open(logo_path)
+            temp_path = "temp_logo.png"
+            img.save(temp_path, "PNG")
+            # Position logo on the right side
+            c.drawImage(temp_path, width - margin - 100, y - 60, width=100, height=100, preserveAspectRatio=True)
+            os.remove(temp_path)
+        except:
+            pass
     
-    # Group timesheet data by description
+    # No title - just move to next section
+    y -= 15*mm
+    
+    # Header information table
+    pay_period_str = pay_period_end.strftime('%B %Y') if isinstance(pay_period_end, dt.datetime) else pay_period_end.strftime('%B %Y')
+    
+    header_data = [
+        ["COMPANY", "WIS Global Resources Ltd", "LOCATION", "Field Site"],
+        ["EMPLOYEE NO.", employee_data['employee_id'], "EMPLOYEE", employee_data['employee_name']],
+        ["TYPE", employee_data['employment_type'], "CURRENCY", f"{employee_data['currency']} ({currency_symbol})"],
+        ["PERIOD", pay_period_str, "", ""],
+    ]
+    
+    header_table = Table(header_data, colWidths=[30*mm, 60*mm, 30*mm, 60*mm])
+    header_table.setStyle(TableStyle([
+        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+        ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+        ('FONT', (0,0), (-1,-1), 'Helvetica', 9),
+        ('FONT', (0,0), (0,-1), 'Helvetica-Bold', 9),
+        ('FONT', (2,0), (2,-1), 'Helvetica-Bold', 9),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+    ]))
+    
+    tw, th = header_table.wrapOn(c, width - 2*margin, y)
+    header_table.drawOn(c, margin, y - th)
+    y -= th + 8*mm
+    
+    # Prepare earnings data
+    earnings_data = [["Description", "Units", "Rate", "Amount"]]
+    total_earnings = 0.0
+    
+    # Add timesheet earnings
     if not timesheet_df.empty:
         timesheet_summary = timesheet_df.groupby('description').agg({
             'units': 'sum',
@@ -689,95 +718,119 @@ def generate_payslip_pdf(employee_data, timesheet_df, pay_period_end):
             'amount': 'sum'
         }).reset_index()
         
-        # Timesheet table headers
-        p.setFont("Helvetica-Bold", 10)
-        p.drawString(50, y_pos, "Description")
-        p.drawString(250, y_pos, "Units")
-        p.drawString(300, y_pos, "Rate")
-        p.drawString(380, y_pos, "Amount")
-        y_pos -= 15
-        
-        # Timesheet data
-        p.setFont("Helvetica", 10)
-        timesheet_total = 0
         for _, row in timesheet_summary.iterrows():
-            p.drawString(50, y_pos, str(row['description'])[:30])
-            p.drawString(250, y_pos, f"{row['units']:.1f}")
-            p.drawString(300, y_pos, f"{currency_symbol}{row['rate']:.2f}")
-            p.drawString(380, y_pos, f"{currency_symbol}{row['amount']:.2f}")
-            timesheet_total += row['amount']
-            y_pos -= 15
-        
-        # Timesheet total
-        p.setFont("Helvetica-Bold", 10)
-        p.drawString(250, y_pos, "Total:")
-        p.drawString(380, y_pos, f"{currency_symbol}{timesheet_total:.2f}")
-        y_pos -= 30
+            if row['amount'] > 0:
+                earnings_data.append([
+                    str(row['description'])[:30],
+                    f"{row['units']:.2f}",
+                    format_currency(row['rate'], currency_symbol),
+                    format_currency(row['amount'], currency_symbol)
+                ])
+                total_earnings += row['amount']
     
-    # Monthly payments
-    p.setFont("Helvetica-Bold", 14)
-    p.drawString(50, y_pos, "Monthly Payments")
-    y_pos -= 20
+    # Add monthly basic salary
+    monthly_salary = employee_data.get('monthly_basic_salary', 0)
+    if isinstance(monthly_salary, str):
+        try:
+            monthly_salary = float(monthly_salary)
+        except ValueError:
+            monthly_salary = 0.0
     
-    monthly_total = 0
+    if monthly_salary > 0:
+        earnings_data.append([
+            "Monthly Basic Salary",
+            "1.00",
+            format_currency(monthly_salary, currency_symbol),
+            format_currency(monthly_salary, currency_symbol)
+        ])
+        total_earnings += monthly_salary
+    
+    # Add other monthly payments
     if employee_data['payments'] and isinstance(employee_data['payments'], dict):
-        p.setFont("Helvetica", 10)
         for payment_name, amount in employee_data['payments'].items():
             if amount > 0:
-                p.drawString(50, y_pos, payment_name)
-                p.drawString(380, y_pos, f"{currency_symbol}{amount:.2f}")
-                monthly_total += amount
-                y_pos -= 15
+                earnings_data.append([
+                    payment_name[:30],
+                    "1.00",
+                    format_currency(amount, currency_symbol),
+                    format_currency(amount, currency_symbol)
+                ])
+                total_earnings += amount
     
-    # Monthly basic salary
-    monthly_salary = employee_data.get('monthly_basic_salary', 0)
-    if monthly_salary > 0:
-        p.drawString(50, y_pos, "Monthly Basic Salary")
-        p.drawString(380, y_pos, f"{currency_symbol}{monthly_salary:.2f}")
-        monthly_total += monthly_salary
-        y_pos -= 15
+    # Earnings table
+    earnings_table = Table(earnings_data, colWidths=[90*mm, 25*mm, 30*mm, 35*mm])
+    earnings_table.setStyle(TableStyle([
+        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+        ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+        ('FONT', (0,0), (-1,0), 'Helvetica-Bold', 9),
+        ('FONT', (0,1), (-1,-1), 'Helvetica', 9),
+        ('ALIGN', (1,1), (-1,-1), 'RIGHT'),
+        ('ALIGN', (0,0), (0,-1), 'LEFT'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+    ]))
     
-    # Monthly total
-    p.setFont("Helvetica-Bold", 10)
-    p.drawString(250, y_pos, "Monthly Total:")
-    p.drawString(380, y_pos, f"{currency_symbol}{monthly_total:.2f}")
-    y_pos -= 30
+    tw, th = earnings_table.wrapOn(c, width - 2*margin, y)
+    earnings_table.drawOn(c, margin, y - th)
+    y -= th + 6*mm
     
-    # Deductions
-    p.setFont("Helvetica-Bold", 14)
-    p.drawString(50, y_pos, "Deductions")
-    y_pos -= 20
+    # Prepare deductions data
+    deductions_data = [["Deductions", "Amount"]]
+    total_deductions = 0.0
     
-    deductions_total = 0
+    # Add regular deductions
     if employee_data['deductions'] and isinstance(employee_data['deductions'], dict):
-        p.setFont("Helvetica", 10)
         for deduction_name, amount in employee_data['deductions'].items():
             if amount > 0:
-                p.drawString(50, y_pos, deduction_name)
-                p.drawString(380, y_pos, f"-{currency_symbol}{amount:.2f}")
-                deductions_total += amount
-                y_pos -= 15
+                deductions_data.append([
+                    deduction_name[:40],
+                    f"- {format_currency(amount, currency_symbol)}"
+                ])
+                total_deductions += amount
     
-    # Deductions total
-    p.setFont("Helvetica-Bold", 10)
-    p.drawString(250, y_pos, "Total Deductions:")
-    p.drawString(380, y_pos, f"-{currency_symbol}{deductions_total:.2f}")
-    y_pos -= 30
+    # Deductions table
+    if len(deductions_data) > 1:  # Only show if there are deductions
+        deductions_table = Table(deductions_data, colWidths=[115*mm, 65*mm])
+        deductions_table.setStyle(TableStyle([
+            ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+            ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+            ('FONT', (0,0), (-1,0), 'Helvetica-Bold', 9),
+            ('FONT', (0,1), (-1,-1), 'Helvetica', 9),
+            ('ALIGN', (1,1), (-1,-1), 'RIGHT'),
+            ('ALIGN', (0,0), (0,-1), 'LEFT'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+        
+        tw, th = deductions_table.wrapOn(c, width - 2*margin, y)
+        deductions_table.drawOn(c, margin, y - th)
+        y -= th + 8*mm
+    else:
+        y -= 5*mm
     
-    # Net pay calculation
-    gross_pay = timesheet_total + monthly_total
-    net_pay = gross_pay - deductions_total
+    # Totals table
+    net_pay = total_earnings - total_deductions
+    totals_data = [
+        ["TOTAL PAYMENTS", format_currency(total_earnings, currency_symbol)],
+        ["TOTAL DEDUCTIONS", f"- {format_currency(total_deductions, currency_symbol)}"],
+        ["TOTAL NET PAY", format_currency(net_pay, currency_symbol)]
+    ]
     
-    # Final totals
-    p.setFont("Helvetica-Bold", 12)
-    p.drawString(50, y_pos, f"Gross Pay: {currency_symbol}{gross_pay:.2f}")
-    y_pos -= 20
-    p.drawString(50, y_pos, f"Total Deductions: -{currency_symbol}{deductions_total:.2f}")
-    y_pos -= 20
-    p.setFont("Helvetica-Bold", 14)
-    p.drawString(50, y_pos, f"NET PAY: {currency_symbol}{net_pay:.2f}")
+    totals_table = Table(totals_data, colWidths=[115*mm, 65*mm])
+    totals_table.setStyle(TableStyle([
+        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+        ('BACKGROUND', (0,0), (-1,-1), colors.lightgrey),
+        ('FONT', (0,0), (-1,-1), 'Helvetica-Bold', 10),
+        ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
+        ('ALIGN', (0,0), (0,-1), 'LEFT'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+    ]))
     
-    p.save()
+    tw, th = totals_table.wrapOn(c, width - 2*margin, y)
+    totals_table.drawOn(c, margin, y - th)
+    y -= th + 10*mm
+    
+    c.showPage()
+    c.save()
+    
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -1925,31 +1978,39 @@ with tab1:
 with tab2:
     st.header("📊 Payslip Generation")
     
-    # File upload section
-    st.subheader("📁 Upload Timesheet")
-    
-    uploaded = st.file_uploader(
-        "Upload GEC Timesheet Excel File", 
-        type=["xls", "xlsx"],
-        help="Upload your GEC template timesheet file"
+    # Choice between single and multiple timesheet upload
+    upload_mode = st.radio(
+        "Select Upload Mode:",
+        ["📄 Single Timesheet", "📁 Multiple Timesheets (Bulk)"],
+        horizontal=True
     )
-
-    if uploaded:
-        st.success(f"✅ File uploaded: {uploaded.name}")
+    
+    if upload_mode == "📄 Single Timesheet":
+        # Original single file upload section
+        st.subheader("📁 Upload Single Timesheet")
         
-        try:
-            # Parse timesheet without employee-specific rates first
-            df = parse_gec_timesheet(uploaded)
-            st.success("📊 Timesheet parsed successfully!")
+        uploaded = st.file_uploader(
+            "Upload GEC Timesheet Excel File", 
+            type=["xls", "xlsx"],
+            help="Upload your GEC template timesheet file",
+            key="single_upload"
+        )
+
+        if uploaded:
+            st.success(f"✅ File uploaded: {uploaded.name}")
             
-            timesheet_employees = df['employee_name'].unique() if 'employee_name' in df.columns else []
-            
-            if len(timesheet_employees) > 0:
-                st.subheader("🔍 Employee Database Matching & Payslip Generation")
+            try:
+                # Parse timesheet without employee-specific rates first
+                df = parse_gec_timesheet(uploaded)
                 
-                matched_employees = []
-                unmatched_employees = []
-                payslip_data = {}
+                timesheet_employees = df['employee_name'].unique() if 'employee_name' in df.columns else []
+                
+                if len(timesheet_employees) > 0:
+                    st.subheader("🔍 Employee Database Matching & Payslip Generation")
+                    
+                    matched_employees = []
+                    unmatched_employees = []
+                    payslip_data = {}
                 
                 # Process each employee from timesheet
                 for ts_emp in timesheet_employees:
@@ -2054,47 +2115,26 @@ with tab2:
                                         st.markdown(f"**💰 NET PAY: {employee_currency}{net_pay:.2f}**")
                                     
                                     # Generate payslip button
-                                    col_pdf, col_excel = st.columns(2)
+                                    if st.button(f"📄 Generate Payslip PDF", key=f"pdf_{db_emp['employee_id']}", use_container_width=True):
+                                        try:
+                                            # Get pay period from timesheet data
+                                            pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
+                                            if pd.isna(pay_period):
+                                                pay_period = dt.datetime.now()
+                                            
+                                            pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period)
+                                            
+                                            st.download_button(
+                                                label=f"💾 Download {ts_name} Payslip.pdf",
+                                                data=pdf_data,
+                                                file_name=f"{ts_name}_Payslip_{pay_period.strftime('%Y_%m')}.pdf",
+                                                mime="application/pdf",
+                                                key=f"download_pdf_{db_emp['employee_id']}",
+                                                use_container_width=True
+                                            )
+                                        except Exception as e:
+                                            st.error(f"Error generating PDF: {str(e)}")
                                     
-                                    with col_pdf:
-                                        if st.button(f"📄 Generate Payslip PDF", key=f"pdf_{db_emp['employee_id']}"):
-                                            try:
-                                                # Get pay period from timesheet data
-                                                pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
-                                                if pd.isna(pay_period):
-                                                    pay_period = dt.datetime.now()
-                                                
-                                                pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period)
-                                                
-                                                st.download_button(
-                                                    label=f"💾 Download {ts_name} Payslip.pdf",
-                                                    data=pdf_data,
-                                                    file_name=f"{ts_name}_Payslip_{pay_period.strftime('%Y_%m')}.pdf",
-                                                    mime="application/pdf",
-                                                    key=f"download_pdf_{db_emp['employee_id']}"
-                                                )
-                                            except Exception as e:
-                                                st.error(f"Error generating PDF: {str(e)}")
-                                    
-                                    with col_excel:
-                                        if st.button(f"📊 Analysis Excel", key=f"excel_{db_emp['employee_id']}"):
-                                            try:
-                                                # Get pay period from timesheet data
-                                                pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
-                                                if pd.isna(pay_period):
-                                                    pay_period = dt.datetime.now()
-                                                
-                                                excel_data = create_corrected_excel(timesheet_df, analysis, pay_period)
-                                                
-                                                st.download_button(
-                                                    label=f"💾 Download {ts_name} Analysis.xlsx",
-                                                    data=excel_data,
-                                                    file_name=f"{ts_name}_Timesheet_Analysis_{pay_period.strftime('%Y_%m')}.xlsx",
-                                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                                    key=f"download_excel_{db_emp['employee_id']}"
-                                                )
-                                            except Exception as e:
-                                                st.error(f"Error generating Excel: {str(e)}")
                                 else:
                                     st.warning("No timesheet data found for this employee.")
                     else:
@@ -2123,112 +2163,345 @@ with tab2:
                 with summary_col3:
                     st.metric("Match %", f"{match_percentage:.1f}%")
                 
-                # Generate all payslips at once
-                if matched_employees:
+                # Only show bulk download if there are multiple employees
+                if matched_employees and len(matched_employees) > 1:
                     st.markdown("---")
                     st.subheader("📦 Bulk Download")
                     
-                    col_bulk_pdf, col_bulk_excel = st.columns(2)
-                    
-                    with col_bulk_pdf:
-                        if st.button("📄 Generate All Payslips (ZIP)", type="primary"):
-                            try:
-                                zip_buffer = io.BytesIO()
-                                with ZipFile(zip_buffer, 'w', ZIP_DEFLATED) as zip_file:
-                                    for ts_name, db_emp in matched_employees:
-                                        emp_data = payslip_data[ts_name]
-                                        timesheet_df = emp_data['timesheet']
+                    if st.button("📄 Generate All Payslips (ZIP)", type="primary", use_container_width=True):
+                        try:
+                            zip_buffer = io.BytesIO()
+                            with ZipFile(zip_buffer, 'w', ZIP_DEFLATED) as zip_file:
+                                for ts_name, db_emp in matched_employees:
+                                    emp_data = payslip_data[ts_name]
+                                    timesheet_df = emp_data['timesheet']
+                                    
+                                    if not timesheet_df.empty:
+                                        # Get pay period
+                                        pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
+                                        if pd.isna(pay_period):
+                                            pay_period = dt.datetime.now()
                                         
-                                        if not timesheet_df.empty:
-                                            # Get pay period
-                                            pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
-                                            if pd.isna(pay_period):
-                                                pay_period = dt.datetime.now()
-                                            
-                                            # Generate PDF
-                                            pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period)
-                                            
-                                            # Add to ZIP
-                                            zip_file.writestr(
-                                                f"{ts_name}_Payslip_{pay_period.strftime('%Y_%m')}.pdf",
-                                                pdf_data
-                                            )
-                                
-                                zip_buffer.seek(0)
-                                st.download_button(
-                                    label="💾 Download All Payslips (ZIP)",
-                                    data=zip_buffer.getvalue(),
-                                    file_name=f"GEC_Payslips_{dt.datetime.now().strftime('%Y_%m')}.zip",
-                                    mime="application/zip"
-                                )
-                            except Exception as e:
-                                st.error(f"Error generating bulk payslips: {str(e)}")
-                    
-                    with col_bulk_excel:
-                        if st.button("📊 Generate All Analysis (ZIP)", type="primary"):
-                            try:
-                                zip_buffer = io.BytesIO()
-                                with ZipFile(zip_buffer, 'w', ZIP_DEFLATED) as zip_file:
-                                    for ts_name, db_emp in matched_employees:
-                                        emp_data = payslip_data[ts_name]
-                                        timesheet_df = emp_data['timesheet']
-                                        analysis = emp_data['analysis']
+                                        # Generate PDF
+                                        pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period)
                                         
-                                        if not timesheet_df.empty:
-                                            # Get pay period
-                                            pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
-                                            if pd.isna(pay_period):
-                                                pay_period = dt.datetime.now()
-                                            
-                                            # Generate Excel
-                                            excel_data = create_corrected_excel(timesheet_df, analysis, pay_period)
-                                            
-                                            # Add to ZIP
-                                            zip_file.writestr(
-                                                f"{ts_name}_Analysis_{pay_period.strftime('%Y_%m')}.xlsx",
-                                                excel_data
-                                            )
-                                
-                                zip_buffer.seek(0)
-                                st.download_button(
-                                    label="💾 Download All Analysis (ZIP)",
-                                    data=zip_buffer.getvalue(),
-                                    file_name=f"GEC_Analysis_{dt.datetime.now().strftime('%Y_%m')}.zip",
-                                    mime="application/zip"
-                                )
-                            except Exception as e:
-                                st.error(f"Error generating bulk analysis: {str(e)}")
+                                        # Add to ZIP
+                                        zip_file.writestr(
+                                            f"{ts_name}_Payslip_{pay_period.strftime('%Y_%m')}.pdf",
+                                            pdf_data
+                                        )
+                            
+                            zip_buffer.seek(0)
+                            st.download_button(
+                                label="💾 Download All Payslips (ZIP)",
+                                data=zip_buffer.getvalue(),
+                                file_name=f"GEC_Payslips_{dt.datetime.now().strftime('%Y_%m')}.zip",
+                                mime="application/zip",
+                                use_container_width=True
+                            )
+                        except Exception as e:
+                            st.error(f"Error generating bulk payslips: {str(e)}")
                 
                 # Raw timesheet data preview
                 st.subheader("📊 Raw Timesheet Data Preview")
                 st.dataframe(df, use_container_width=True)
                 
-        except Exception as e:
-            st.error(f"❌ Error parsing timesheet: {str(e)}")
-            st.error("Please make sure the Excel file follows the GEC timesheet format.")
+            except Exception as e:
+                st.error(f"❌ Error parsing timesheet: {str(e)}")
+                st.error("Please make sure the Excel file follows the GEC timesheet format.")
+        else:
+            st.info("👆 Please upload an Excel file to continue")
+            
+            # Show example format
+            st.markdown("### 📋 Expected Timesheet Format")
+            st.markdown("""
+            The Excel file should contain:
+            1. **Employee Name** in a cell containing "Employee Name" 
+            2. **Pay Period** in a cell containing "Pay Period"
+            3. **Date headers** in a row (multiple consecutive dates)
+            4. **Data rows** with:
+               - Column A: Location
+               - Column C: Description ("Rig days", "Standby Days", "Bonus In Country", "Premium In-country")
+               - Columns 3+: Daily values for each date
+            """)
+            
+            st.markdown("### 💰 Rate Mapping")
+            st.markdown("""
+            Rates are automatically pulled from each employee's **Additional Daily Payments**:
+            - **Field Bonus/Job Bonus** → Used for "Bonus In Country" descriptions
+            - **Rotation Premium** → Used for "Premium In-country" descriptions  
+            - **Standby Rate** → Used for "standby days", "standby rate"
+            - **Wellsite Rate** → Used for "rig days", "wellsite rate"
+            """)
+            
+            st.info("💡 **Tip**: Make sure employees are added in the Employee Management tab with their Additional Daily Payments configured!")
+
     else:
-        st.info("👆 Please upload an Excel file to continue")
+        # Multiple Timesheets Upload Section
+        st.subheader("📁 Upload Multiple Timesheets")
+        st.info("Upload multiple timesheet files to process all employees at once!")
         
-        # Show example format
-        st.markdown("### 📋 Expected Timesheet Format")
-        st.markdown("""
-        The Excel file should contain:
-        1. **Employee Name** in a cell containing "Employee Name" 
-        2. **Pay Period** in a cell containing "Pay Period"
-        3. **Date headers** in a row (multiple consecutive dates)
-        4. **Data rows** with:
-           - Column A: Location
-           - Column C: Description ("Rig days", "Standby Days", "Bonus In Country", "Premium In-country")
-           - Columns 3+: Daily values for each date
-        """)
+        # Multiple file upload
+        uploaded_files = st.file_uploader(
+            "Upload Multiple GEC Timesheet Excel Files", 
+            type=["xls", "xlsx"],
+            accept_multiple_files=True,
+            help="Select multiple GEC template timesheet files",
+            key="multiple_upload"
+        )
+
+        if uploaded_files:
+            st.success(f"✅ {len(uploaded_files)} files uploaded successfully!")
+            
+            # Initialize storage for all data
+            all_matched_employees = []
+            all_unmatched_employees = []
+            all_payslip_data = {}
+            processing_errors = []
+            
+            # Progress bar
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Process each file
+            for i, uploaded_file in enumerate(uploaded_files):
+                status_text.text(f"Processing {uploaded_file.name}...")
+                progress_bar.progress((i + 1) / len(uploaded_files))
+                
+                try:
+                    # Parse timesheet
+                    df = parse_gec_timesheet(uploaded_file)
+                    timesheet_employees = df['employee_name'].unique() if 'employee_name' in df.columns else []
+                    
+                    if len(timesheet_employees) > 0:
+                        # Get database employees
+                        db_employees = get_all_employees()
+                        
+                        # Find matches
+                        for ts_name in timesheet_employees:
+                            # Clean up employee name for matching
+                            cleaned_ts_name = ts_name.strip().replace('_', ' ').replace('-', ' ')
+                            
+                            # Find matching employee in database
+                            matched_db_emp = None
+                            for db_emp in db_employees:
+                                db_name = db_emp['employee_name'].strip().replace('_', ' ').replace('-', ' ')
+                                if cleaned_ts_name.lower() == db_name.lower() or ts_name.lower() == db_emp['employee_id'].lower():
+                                    matched_db_emp = db_emp
+                                    break
+                            
+                            if matched_db_emp:
+                                # Employee matched - prepare data
+                                employee_df = df[df['employee_name'] == ts_name].copy()
+                                
+                                # Parse with employee-specific rates
+                                employee_df_with_rates = parse_gec_timesheet(uploaded_file, matched_db_emp['employee_id'])
+                                employee_timesheet = employee_df_with_rates[employee_df_with_rates['employee_name'] == ts_name].copy()
+                                
+                                if not employee_timesheet.empty:
+                                    # Calculate totals and analysis
+                                    analysis = analyze_multiple_location_issue(employee_timesheet)
+                                    
+                                    # Store data
+                                    all_payslip_data[ts_name] = {
+                                        'employee': matched_db_emp,
+                                        'timesheet': employee_timesheet,
+                                        'analysis': analysis,
+                                        'file_name': uploaded_file.name
+                                    }
+                                    
+                                    all_matched_employees.append((ts_name, matched_db_emp, uploaded_file.name))
+                                else:
+                                    all_unmatched_employees.append(f"{ts_name} (from {uploaded_file.name}) - No timesheet data")
+                            else:
+                                all_unmatched_employees.append(f"{ts_name} (from {uploaded_file.name}) - Not in database")
+                    
+                except Exception as e:
+                    processing_errors.append(f"{uploaded_file.name}: {str(e)}")
+            
+            status_text.text("Processing complete!")
+            progress_bar.progress(1.0)
+            
+            # Show results
+            st.markdown("---")
+            st.subheader("📊 Processing Results")
+            
+            # Show summary metrics
+            total_files = len(uploaded_files)
+            total_employees = len(all_matched_employees) + len(all_unmatched_employees)
+            matched_count = len(all_matched_employees)
+            match_percentage = (matched_count / total_employees * 100) if total_employees > 0 else 0
+            
+            col_metrics1, col_metrics2, col_metrics3, col_metrics4 = st.columns(4)
+            with col_metrics1:
+                st.metric("Files Processed", total_files)
+            with col_metrics2:
+                st.metric("Total Employees", total_employees)
+            with col_metrics3:
+                st.metric("Matched", matched_count)
+            with col_metrics4:
+                st.metric("Match Rate", f"{match_percentage:.1f}%")
+            
+            # Show processing errors if any
+            if processing_errors:
+                st.markdown("### ⚠️ Processing Errors")
+                for error in processing_errors:
+                    st.error(error)
+            
+            # Show matched and unmatched employees
+            col_matched, col_unmatched = st.columns(2)
+            
+            with col_matched:
+                st.markdown("### ✅ Matched Employees")
+                if all_matched_employees:
+                    for ts_name, db_emp, file_name in all_matched_employees:
+                        st.success(f"✅ **{ts_name}** (from {file_name})")
+                        st.caption(f"→ Database: {db_emp['employee_name']} ({db_emp['employee_id']})")
+                else:
+                    st.info("No employees matched.")
+            
+            with col_unmatched:
+                st.markdown("### ❌ Unmatched Employees")
+                if all_unmatched_employees:
+                    for unmatched in all_unmatched_employees:
+                        st.warning(f"❌ {unmatched}")
+                    st.warning("💡 Add missing employees in the Employee Management tab.")
+                else:
+                    st.success("✅ All employees matched!")
+            
+            # Generate All Payslips Button
+            if all_matched_employees:
+                st.markdown("---")
+                st.subheader("🚀 Bulk Payslip Generation")
+                
+                col_gen_all, col_spacer = st.columns([2, 1])
+                with col_gen_all:
+                    if st.button("📄 Generate All Payslips Now", type="primary", use_container_width=True):
+                        try:
+                            # Create ZIP file with all payslips
+                            zip_buffer = io.BytesIO()
+                            with ZipFile(zip_buffer, 'w', ZIP_DEFLATED) as zip_file:
+                                
+                                progress_gen = st.progress(0)
+                                status_gen = st.empty()
+                                
+                                for i, (ts_name, db_emp, file_name) in enumerate(all_matched_employees):
+                                    status_gen.text(f"Generating payslip for {ts_name}...")
+                                    progress_gen.progress((i + 1) / len(all_matched_employees))
+                                    
+                                    emp_data = all_payslip_data[ts_name]
+                                    timesheet_df = emp_data['timesheet']
+                                    
+                                    if not timesheet_df.empty:
+                                        # Get pay period
+                                        pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
+                                        if pd.isna(pay_period):
+                                            pay_period = dt.datetime.now()
+                                        
+                                        # Generate PDF
+                                        pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period)
+                                        
+                                        # Add to ZIP with employee name
+                                        safe_name = ts_name.replace('/', '_').replace('\\', '_')
+                                        zip_file.writestr(
+                                            f"{safe_name}_Payslip_{pay_period.strftime('%Y_%m')}.pdf",
+                                            pdf_data
+                                        )
+                                
+                                status_gen.text("All payslips generated successfully!")
+                                progress_gen.progress(1.0)
+                            
+                            zip_buffer.seek(0)
+                            st.download_button(
+                                label="💾 Download All Payslips (ZIP)",
+                                data=zip_buffer.getvalue(),
+                                file_name=f"GEC_All_Payslips_{dt.datetime.now().strftime('%Y_%m_%d')}.zip",
+                                mime="application/zip",
+                                use_container_width=True
+                            )
+                            
+                            st.success(f"🎉 Successfully generated {len(all_matched_employees)} payslips!")
+                            
+                        except Exception as e:
+                            st.error(f"Error generating bulk payslips: {str(e)}")
+                
+                # Individual payslip previews
+                st.markdown("### 👀 Individual Payslip Previews")
+                st.info("Click on an employee below to preview their payslip details:")
+                
+                for ts_name, db_emp, file_name in all_matched_employees:
+                    with st.expander(f"📄 {ts_name} - {db_emp['employee_id']} (from {file_name})"):
+                        emp_data = all_payslip_data[ts_name]
+                        timesheet_df = emp_data['timesheet']
+                        analysis = emp_data['analysis']
+                        
+                        if not timesheet_df.empty:
+                            # Show payslip preview (same as single file)
+                            col_preview1, col_preview2 = st.columns(2)
+                            
+                            with col_preview1:
+                                st.markdown("#### 💼 Employee Information")
+                                st.markdown(f"**Name:** {db_emp['employee_name']}")
+                                st.markdown(f"**ID:** {db_emp['employee_id']}")
+                                st.markdown(f"**Type:** {db_emp['employment_type']}")
+                                
+                                # Get currency symbol
+                                employee_currency = get_currency_symbol(db_emp.get('currency', 'EUR'))
+                                st.markdown(f"**Currency:** {db_emp.get('currency', 'EUR')} ({employee_currency})")
+                            
+                            with col_preview2:
+                                st.markdown("#### 📊 Timesheet Summary")
+                                if 'working_days' in analysis:
+                                    st.markdown(f"**Working Days:** {analysis['working_days']}")
+                                if 'standby_days' in analysis:
+                                    st.markdown(f"**Standby Days:** {analysis['standby_days']}")
+                                if 'bonus_days' in analysis:
+                                    st.markdown(f"**Bonus Days:** {analysis['bonus_days']}")
+                                if 'premium_days' in analysis:
+                                    st.markdown(f"**Premium Days:** {analysis['premium_days']}")
+                            
+                            # Calculate totals for preview
+                            timesheet_earnings = timesheet_df['amount'].sum() if 'amount' in timesheet_df.columns else 0
+                            
+                            # Monthly payments
+                            monthly_payments = 0
+                            if db_emp['payments'] and isinstance(db_emp['payments'], dict):
+                                monthly_payments = sum(db_emp['payments'].values())
+                            
+                            # Monthly basic salary
+                            monthly_salary = db_emp.get('monthly_basic_salary', 0)
+                            if isinstance(monthly_salary, str):
+                                try:
+                                    monthly_salary = float(monthly_salary)
+                                except ValueError:
+                                    monthly_salary = 0.0
+                            
+                            # Regular deductions
+                            deductions_total = 0
+                            if db_emp['deductions'] and isinstance(db_emp['deductions'], dict):
+                                deductions_total = sum(db_emp['deductions'].values())
+                            
+                            # Calculate totals
+                            gross_pay = monthly_salary + monthly_payments + timesheet_earnings
+                            net_pay = gross_pay - deductions_total
+                            
+                            st.markdown("#### 💰 Payment Summary")
+                            st.markdown(f"**Gross Pay:** {employee_currency}{gross_pay:.2f}")
+                            st.markdown(f"**Total Deductions:** {employee_currency}{deductions_total:.2f}")
+                            st.markdown(f"**NET PAY:** {employee_currency}{net_pay:.2f}")
+                        
+                        else:
+                            st.warning("No timesheet data found for this employee.")
         
-        st.markdown("### 💰 Rate Mapping")
-        st.markdown("""
-        Rates are automatically pulled from each employee's **Additional Daily Payments**:
-        - **Field Bonus/Job Bonus** → Used for "Bonus In Country" descriptions
-        - **Rotation Premium** → Used for "Premium In-country" descriptions  
-        - **Standby Rate** → Used for "standby days", "standby rate"
-        - **Wellsite Rate** → Used for "rig days", "wellsite rate"
-        """)
-        
-        st.info("💡 **Tip**: Make sure employees are added in the Employee Management tab with their Additional Daily Payments configured!")
+        else:
+            st.info("👆 Please upload multiple Excel files to continue")
+            st.markdown("### 📋 Multiple Timesheets Benefits")
+            st.markdown("""
+            - **Bulk Processing**: Upload multiple employee timesheets at once
+            - **Auto-Matching**: System automatically identifies and matches employees with database
+            - **Bulk Generation**: Generate all payslips with one click
+            - **Error Tracking**: See which employees couldn't be matched
+            - **Organized Downloads**: Get all payslips in a single ZIP file, named by employee
+            """)
+            
+            st.info("💡 **Tip**: Make sure all employees are added in the Employee Management tab before uploading their timesheets!")
