@@ -422,6 +422,7 @@ def parse_gec_timesheet(file_path_or_buffer, employee_additional_payments=None) 
     # Extract employee information
     employee_name = None
     pay_period = None
+    country = None
     
     for i, row in raw_df.iterrows():
         if pd.notna(row.iloc[0]) and 'Employee Name' in str(row.iloc[0]):
@@ -435,6 +436,39 @@ def parse_gec_timesheet(file_path_or_buffer, employee_additional_payments=None) 
                     pay_period = pd.to_datetime(row.iloc[2])
                 except:
                     pass
+        
+        # Look for country information - be more specific to avoid false matches
+        if pd.notna(row.iloc[0]):
+            cell_text = str(row.iloc[0]).strip()
+            # Look for exact "Country:" (not "Work Country")
+            if cell_text == "Country:" or "Country:" in cell_text:
+                # Look for the country value in the same row, but avoid false matches
+                for col_idx in range(1, min(len(row), 25)):  # Check columns after "Country:"
+                    if pd.notna(row.iloc[col_idx]):
+                        country_text = str(row.iloc[col_idx]).strip()
+                        # Clean up the country text and validate it's actually a country name
+                        if (country_text and 
+                            country_text not in ["Pay Element", "Element", "Record Hours", "Days", ""] and
+                            not any(word in country_text.lower() for word in ["pay", "element", "record", "hours", "days", "increment"])):
+                            country = country_text
+                            break
+        
+        # Also check for "Country:" in other columns (like we saw in row 3, column 17)
+        for col_idx in range(1, min(len(row), len(row))):
+            if pd.notna(row.iloc[col_idx]):
+                cell_text = str(row.iloc[col_idx]).strip()
+                if cell_text == "Country:":
+                    # Look for country value in the next few columns
+                    for next_col in range(col_idx + 1, min(len(row), col_idx + 6)):
+                        if pd.notna(row.iloc[next_col]):
+                            country_text = str(row.iloc[next_col]).strip()
+                            if (country_text and 
+                                country_text not in ["Pay Element", "Element", "Record Hours", "Days", ""] and
+                                not any(word in country_text.lower() for word in ["pay", "element", "record", "hours", "days", "increment"])):
+                                country = country_text
+                                break
+                    if country:  # Break out of outer loop if found
+                        break
     
     # Find the data start (look for date headers)
     data_start_row = None
@@ -505,7 +539,8 @@ def parse_gec_timesheet(file_path_or_buffer, employee_additional_payments=None) 
                                 'units': hours,
                                 'rate': 0.0,
                                 'amount': 0.0,
-                                'pay_period': pay_period
+                                'pay_period': pay_period,
+                                'country': country or 'Field Site'
                             })
                     except (ValueError, TypeError):
                         pass
@@ -652,7 +687,7 @@ def format_currency(amount, currency_symbol):
     except Exception:
         return str(amount)
 
-def generate_payslip_pdf(employee_data, timesheet_df, pay_period_end):
+def generate_payslip_pdf(employee_data, timesheet_df, pay_period_end, country=None):
     """Generate professional table-based payslip PDF matching old.py format"""
     buffer = io.BytesIO()
     
@@ -684,8 +719,15 @@ def generate_payslip_pdf(employee_data, timesheet_df, pay_period_end):
     # Header information table
     pay_period_str = pay_period_end.strftime('%B %Y') if isinstance(pay_period_end, dt.datetime) else pay_period_end.strftime('%B %Y')
     
+    # Extract country from timesheet data if not provided
+    location = country
+    if not location and not timesheet_df.empty and 'country' in timesheet_df.columns:
+        location = timesheet_df['country'].iloc[0] if not timesheet_df['country'].isna().all() else "Field Site"
+    if not location:
+        location = "Field Site"
+    
     header_data = [
-        ["COMPANY", "WIS Global Resources Ltd", "LOCATION", "Field Site"],
+        ["COMPANY", "WIS Global Resources Ltd", "LOCATION", location],
         ["EMPLOYEE NO.", employee_data['employee_id'], "EMPLOYEE", employee_data['employee_name']],
         ["TYPE", employee_data['employment_type'], "CURRENCY", f"{employee_data['currency']} ({currency_symbol})"],
         ["PERIOD", pay_period_str, "", ""],
@@ -2121,8 +2163,10 @@ with tab2:
                                             pay_period = timesheet_df['pay_period'].iloc[0] if 'pay_period' in timesheet_df.columns and not timesheet_df['pay_period'].isna().all() else dt.datetime.now()
                                             if pd.isna(pay_period):
                                                 pay_period = dt.datetime.now()
+                                            # Get country from timesheet data
+                                            country = timesheet_df['country'].iloc[0] if 'country' in timesheet_df.columns and not timesheet_df['country'].isna().all() else None
                                             
-                                            pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period)
+                                            pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period, country)
                                             
                                             st.download_button(
                                                 label=f"💾 Download {ts_name} Payslip.pdf",
@@ -2182,8 +2226,11 @@ with tab2:
                                         if pd.isna(pay_period):
                                             pay_period = dt.datetime.now()
                                         
+                                        # Get country from timesheet data
+                                        country = timesheet_df['country'].iloc[0] if 'country' in timesheet_df.columns and not timesheet_df['country'].isna().all() else None
+                                        
                                         # Generate PDF
-                                        pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period)
+                                        pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period, country)
                                         
                                         # Add to ZIP
                                         zip_file.writestr(
@@ -2398,8 +2445,11 @@ with tab2:
                                         if pd.isna(pay_period):
                                             pay_period = dt.datetime.now()
                                         
+                                        # Get country from timesheet data
+                                        country = timesheet_df['country'].iloc[0] if 'country' in timesheet_df.columns and not timesheet_df['country'].isna().all() else None
+                                        
                                         # Generate PDF
-                                        pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period)
+                                        pdf_data = generate_payslip_pdf(db_emp, timesheet_df, pay_period, country)
                                         
                                         # Add to ZIP with employee name
                                         safe_name = ts_name.replace('/', '_').replace('\\', '_')
