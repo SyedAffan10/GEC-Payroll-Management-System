@@ -2329,28 +2329,18 @@ with tab2:
                     timesheet_employees = df['employee_name'].unique() if 'employee_name' in df.columns else []
                     
                     if len(timesheet_employees) > 0:
-                        # Get database employees
-                        db_employees = get_all_employees()
-                        
-                        # Find matches
+                        # Find matches (same logic as single timesheet)
                         for ts_name in timesheet_employees:
-                            # Clean up employee name for matching
-                            cleaned_ts_name = ts_name.strip().replace('_', ' ').replace('-', ' ')
-                            
-                            # Find matching employee in database
-                            matched_db_emp = None
-                            for db_emp in db_employees:
-                                db_name = db_emp['employee_name'].strip().replace('_', ' ').replace('-', ' ')
-                                if cleaned_ts_name.lower() == db_name.lower() or ts_name.lower() == db_emp['employee_id'].lower():
-                                    matched_db_emp = db_emp
-                                    break
+                            # Use same function as single timesheet for consistency
+                            matched_db_emp = get_employee_by_name(ts_name)
                             
                             if matched_db_emp:
                                 # Employee matched - prepare data
                                 employee_df = df[df['employee_name'] == ts_name].copy()
                                 
-                                # Parse with employee-specific rates
-                                employee_df_with_rates = parse_gec_timesheet(uploaded_file, matched_db_emp['employee_id'])
+                                # Parse with employee-specific rates (same logic as single timesheet)
+                                employee_additional_payments = matched_db_emp.get('additional_daily_payments', {})
+                                employee_df_with_rates = parse_gec_timesheet(uploaded_file, employee_additional_payments)
                                 employee_timesheet = employee_df_with_rates[employee_df_with_rates['employee_name'] == ts_name].copy()
                                 
                                 if not employee_timesheet.empty:
